@@ -8,16 +8,15 @@ Public surface (do not rename; the application layer and launcher import these):
 
 from __future__ import annotations
 
-from typing import Any
-
 from backend.config import AppConfig
 from backend.contracts.runtime import OpenCodeRuntime
 
+from .agent_config import AGENT_NAME, build_opencode_config
+from .opencode import HttpOpenCodeRuntime
 
-def build_opencode_config() -> dict[str, Any]:
-    """Config passed to the app-managed server via OPENCODE_CONFIG_CONTENT."""
-    raise NotImplementedError("runtime agent: implement")
+__all__ = ["AGENT_NAME", "HttpOpenCodeRuntime", "build_opencode_config", "create_runtime"]
 
 
 def create_runtime(config: AppConfig) -> OpenCodeRuntime:
-    raise NotImplementedError("runtime agent: implement")
+    """An ``OpenCodeRuntime`` bound to ``config.opencode_url`` (HTTP Basic auth)."""
+    return HttpOpenCodeRuntime(config)
