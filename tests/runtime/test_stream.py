@@ -518,3 +518,12 @@ async def test_a_silent_model_times_out_and_is_aborted(fake: FakeOpenCode):
         assert len(fake.aborts) == 1
     finally:
         await rt.aclose()
+
+
+async def test_non_transient_retry_message_fails_immediately(fake: FakeOpenCode, runtime):
+    message = "This model requires you to complete the following before use: 18+ age confirmation."
+    fake.default_behavior = retry_turn(message)
+    session = await runtime.create_session("chat")
+    events = await asyncio.wait_for(collect(runtime, request(session)), 5)
+    assert isinstance(events[-1], Failed)
+    assert "18+ age confirmation" in events[-1].message

@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import re
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -65,6 +66,13 @@ MAX_TRANSIENT_RETRIES = 2  # OpenCode's own backoff retries tolerated for non-ra
 SNAPSHOT_LIMIT = 8
 
 _RATE_LIMIT_REASONS = {"free_tier_limit", "account_rate_limit"}
+# Messages worth waiting out while OpenCode backs off. Anything else (e.g. an account gate such
+# as "requires 18+ age confirmation") will not fix itself, so it fails the turn immediately.
+_TRANSIENT = re.compile(
+    r"overload|timeout|timed out|temporar|try again|service unavailable|bad gateway"
+    r"|gateway|\b5\d\d\b|connection|econn|network|socket|reset by peer|capacity|busy",
+    re.IGNORECASE,
+)
 
 
 class _StreamEnded(Exception):
@@ -470,7 +478,13 @@ def _retry_failure(status: dict[str, Any], text_so_far: str) -> Failed | None:
     code = ErrorCode.RATE_LIMITED if reason in _RATE_LIMIT_REASONS else classify_text(message or "")
     attempt = status.get("attempt")
     attempts = attempt if isinstance(attempt, int) else 1
-    if code is ErrorCode.RUNTIME_ERROR and not text_so_far and attempts <= MAX_TRANSIENT_RETRIES:
+    transient = not message or _TRANSIENT.search(message) is not None
+    if (
+        code is ErrorCode.RUNTIME_ERROR
+        and transient
+        and not text_so_far
+        and attempts <= MAX_TRANSIENT_RETRIES
+    ):
         return None
     return Failed(code, message or "The provider kept failing and OpenCode is retrying")
 
