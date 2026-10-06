@@ -154,6 +154,8 @@ def opencode_env(config: AppConfig, base: Mapping[str, str] | None = None) -> di
         OPENCODE_CONFIG_CONTENT=json.dumps(build_opencode_config()),
         OPENCODE_DISABLE_AUTOUPDATE="1",
         OPENCODE_DISABLE_PROJECT_CONFIG="1",
+        # Keep the user's ~/.claude/CLAUDE.md out of every agent's system prompt.
+        OPENCODE_DISABLE_CLAUDE_CODE="1",
     )
     return env
 
