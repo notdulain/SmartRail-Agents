@@ -256,7 +256,7 @@ export function AgentEditorDialog({ agent, onClose }: Props) {
               ref={personaRef}
               value={persona}
               onChange={(e) => setPersona(e.target.value)}
-              rows={6}
+              rows={5}
               className={`${inputClass} resize-y`}
             />
           )}

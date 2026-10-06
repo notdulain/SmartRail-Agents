@@ -20,6 +20,12 @@ export function Composer({ placeholder, disabled, running, stopping, onSend, onS
   const ref = useRef<HTMLTextAreaElement>(null);
   const wasDisabled = useRef(disabled);
 
+  // Opening a conversation puts the cursor in the composer (not on touch screens, where it
+  // would pop the keyboard up).
+  useEffect(() => {
+    if (window.matchMedia?.("(pointer: fine)").matches && !disabled) ref.current?.focus();
+  }, []);
+
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;

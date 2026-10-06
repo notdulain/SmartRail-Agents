@@ -164,7 +164,7 @@ function AgentMessage({
           <p className="mt-0.5 text-xs text-muted">Replying to {replyTo.speaker_name}</p>
         ) : null}
 
-        {message.content || !streaming ? (
+        {message.status === "failed" && !message.content ? null : message.content || !streaming ? (
           <div
             className={`mt-1 whitespace-pre-wrap break-words rounded-2xl rounded-tl-md bg-surface px-4 py-2.5 text-[0.95rem] ring-1 ring-line ${
               streaming ? "streaming-caret" : ""
@@ -187,8 +187,8 @@ function AgentMessage({
             className="mt-2 flex flex-wrap items-start gap-x-3 gap-y-2 rounded-lg bg-danger-soft px-3 py-2 text-sm text-danger"
           >
             <AlertIcon className="mt-0.5 shrink-0" />
-            <p className="min-w-0 flex-1">
-              {message.error ?? "This reply failed."}
+            <p className="min-w-48 flex-1">
+              {sentence(message.error ?? "This reply failed")}
               {message.error_code === "rate_limited"
                 ? " The provider is rate limiting; try again shortly."
                 : null}
@@ -206,4 +206,10 @@ function AgentMessage({
       </div>
     </article>
   );
+}
+
+/** Ends a message with a full stop so appended hints read naturally. */
+function sentence(text: string): string {
+  const t = text.trim();
+  return /[.!?]$/.test(t) ? t : `${t}.`;
 }

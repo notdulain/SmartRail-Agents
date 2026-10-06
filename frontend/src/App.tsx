@@ -35,6 +35,15 @@ function Shell() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
+  // The drawer only exists on narrow screens; drop it when the window grows past that.
+  useEffect(() => {
+    const mq = window.matchMedia?.("(min-width: 768px)");
+    if (!mq) return;
+    const onChange = () => mq.matches && setSidebarOpen(false);
+    mq.addEventListener?.("change", onChange);
+    return () => mq.removeEventListener?.("change", onChange);
+  }, []);
+
   const select = useCallback((id: string | null) => {
     window.location.hash = id ? `#/c/${encodeURIComponent(id)}` : "";
     setSelectedId(id);
@@ -65,7 +74,11 @@ function Shell() {
   }
 
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
-  const openAgent = (agent: Agent | null) => setDialog({ kind: "agent", agent });
+  const openDialog = (d: DialogState) => {
+    setSidebarOpen(false);
+    setDialog(d);
+  };
+  const openAgent = (agent: Agent | null) => openDialog({ kind: "agent", agent });
 
   return (
     <div className="flex h-dvh overflow-hidden">
@@ -75,12 +88,12 @@ function Shell() {
         onClose={closeSidebar}
         onSelect={select}
         onNewAgent={() => openAgent(null)}
-        onNewDiscussion={() => setDialog({ kind: "discussion" })}
+        onNewDiscussion={() => openDialog({ kind: "discussion" })}
         onEditAgent={openAgent}
         onChatWithAgent={(a) => void chatWithAgent(a)}
-        onOpenSettings={() => setDialog({ kind: "settings" })}
+        onOpenSettings={() => openDialog({ kind: "settings" })}
       />
-      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <main inert={sidebarOpen || undefined} className="flex min-h-0 min-w-0 flex-1 flex-col">
         {data.loadFailed ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
             <p className="text-sm text-muted" role="alert">
@@ -93,9 +106,9 @@ function Shell() {
             key={selectedId ?? "home"}
             conversationId={selectedId}
             onOpenSidebar={() => setSidebarOpen(true)}
-            onOpenSettings={() => setDialog({ kind: "settings" })}
+            onOpenSettings={() => openDialog({ kind: "settings" })}
             onEditAgent={openAgent}
-            onNewDiscussion={() => setDialog({ kind: "discussion" })}
+            onNewDiscussion={() => openDialog({ kind: "discussion" })}
             onNewAgent={() => openAgent(null)}
             onRunEnded={onRunEnded}
           />
@@ -116,7 +129,7 @@ function Shell() {
             setDialog(null);
             select(c.id);
           }}
-          onOpenSettings={() => setDialog({ kind: "settings" })}
+          onOpenSettings={() => openDialog({ kind: "settings" })}
           onNewAgent={() => openAgent(null)}
         />
       ) : null}
