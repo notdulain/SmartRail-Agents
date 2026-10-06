@@ -1,1 +1,171 @@
 @import "tailwindcss";
+
+/* Design tokens. Light by default; dark follows prefers-color-scheme. */
+:root {
+  color-scheme: light dark;
+  --bg: oklch(0.975 0.004 95);
+  --surface: oklch(1 0 0);
+  --sunken: oklch(0.955 0.005 95);
+  --line: oklch(0.9 0.006 95);
+  --line-strong: oklch(0.82 0.008 95);
+  --fg: oklch(0.24 0.012 255);
+  --muted: oklch(0.5 0.012 255);
+  --accent: oklch(0.45 0.09 245);
+  --accent-hover: oklch(0.4 0.09 245);
+  --accent-fg: oklch(0.99 0 0);
+  --accent-soft: oklch(0.95 0.025 245);
+  --danger: oklch(0.5 0.17 27);
+  --danger-soft: oklch(0.96 0.025 27);
+  --warn: oklch(0.5 0.1 70);
+  --warn-soft: oklch(0.96 0.045 85);
+  --ok: oklch(0.48 0.1 155);
+  --ok-soft: oklch(0.95 0.035 155);
+  --overlay: oklch(0.2 0.02 255 / 0.4);
+
+  --sp-0: oklch(0.5 0.1 250);
+  --sp-0-soft: oklch(0.96 0.02 250);
+  --sp-1: oklch(0.5 0.1 160);
+  --sp-1-soft: oklch(0.96 0.025 160);
+  --sp-2: oklch(0.52 0.11 40);
+  --sp-2-soft: oklch(0.96 0.025 40);
+  --sp-3: oklch(0.5 0.1 310);
+  --sp-3-soft: oklch(0.96 0.02 310);
+  --sp-4: oklch(0.52 0.09 90);
+  --sp-4-soft: oklch(0.96 0.03 90);
+  --sp-5: oklch(0.5 0.08 200);
+  --sp-5-soft: oklch(0.96 0.02 200);
+  --sp-6: oklch(0.52 0.12 10);
+  --sp-6-soft: oklch(0.96 0.025 10);
+  --sp-7: oklch(0.5 0.11 280);
+  --sp-7-soft: oklch(0.96 0.02 280);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: oklch(0.2 0.01 255);
+    --surface: oklch(0.245 0.012 255);
+    --sunken: oklch(0.22 0.011 255);
+    --line: oklch(0.32 0.012 255);
+    --line-strong: oklch(0.42 0.014 255);
+    --fg: oklch(0.93 0.006 255);
+    --muted: oklch(0.7 0.012 255);
+    --accent: oklch(0.74 0.09 245);
+    --accent-hover: oklch(0.8 0.09 245);
+    --accent-fg: oklch(0.2 0.02 255);
+    --accent-soft: oklch(0.31 0.04 245);
+    --danger: oklch(0.76 0.13 27);
+    --danger-soft: oklch(0.3 0.05 27);
+    --warn: oklch(0.8 0.11 85);
+    --warn-soft: oklch(0.31 0.05 85);
+    --ok: oklch(0.78 0.11 155);
+    --ok-soft: oklch(0.29 0.04 155);
+    --overlay: oklch(0.1 0.01 255 / 0.6);
+
+    --sp-0: oklch(0.78 0.09 250);
+    --sp-0-soft: oklch(0.3 0.035 250);
+    --sp-1: oklch(0.78 0.09 160);
+    --sp-1-soft: oklch(0.29 0.035 160);
+    --sp-2: oklch(0.79 0.1 40);
+    --sp-2-soft: oklch(0.31 0.04 40);
+    --sp-3: oklch(0.78 0.09 310);
+    --sp-3-soft: oklch(0.3 0.035 310);
+    --sp-4: oklch(0.8 0.09 90);
+    --sp-4-soft: oklch(0.3 0.035 90);
+    --sp-5: oklch(0.78 0.08 200);
+    --sp-5-soft: oklch(0.29 0.03 200);
+    --sp-6: oklch(0.78 0.1 10);
+    --sp-6-soft: oklch(0.3 0.04 10);
+    --sp-7: oklch(0.78 0.09 280);
+    --sp-7-soft: oklch(0.3 0.035 280);
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-sunken: var(--sunken);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-speaker: var(--speaker);
+  --color-speaker-soft: var(--speaker-soft);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+/* Animated typing cursor for streaming messages. */
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+.streaming-caret::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--speaker, var(--muted));
+  border-radius: 1px;
+  animation: caret-blink 1s steps(2, start) infinite;
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.99);
+  }
+}
+.animate-pop {
+  animation: pop-in 140ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
