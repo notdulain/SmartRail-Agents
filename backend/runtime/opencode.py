@@ -1,4 +1,14 @@
-"""``OpenCodeRuntime`` implemented against a real OpenCode server (HTTP + SSE, pinned 1.18.22).
+"""``OpenCodeRuntime`` implemented against a real OpenCode server (HTTP + SSE).
+
+Shapes verified against OpenCode 1.18.22 and 1.18.33.
+
+OpenCode runs one *instance* per directory and selects it per request from the ``directory``
+query parameter (then the ``x-opencode-directory`` header, then its own cwd). A session created
+with ``?directory=D`` lives in instance ``D``, and its events are published only on that
+instance's ``GET /event?directory=D`` stream. So every call for a session with a working
+directory (prompt, abort, message reads, ``/session/status``, the event subscription) carries
+that directory; the runtime remembers session -> directory. Sessions without a directory use
+OpenCode's own (neutral) cwd and never send the parameter.
 
 How one turn works (see ``stream``):
 
@@ -21,6 +31,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import os
 import re
 import time
 from collections.abc import AsyncIterator
@@ -82,11 +93,26 @@ class _StreamEnded(Exception):
 _STREAM_ERRORS = (httpx.TransportError, httpx.DecodingError, _StreamEnded, TimeoutError)
 
 
-class _EventConnection:
-    """One SSE subscription to ``GET /event``."""
+def _where(directory: str | None) -> dict[str, str]:
+    """Query parameters selecting the OpenCode instance for ``directory`` (none = neutral)."""
+    return {"directory": directory} if directory else {}
 
-    def __init__(self, client: httpx.AsyncClient) -> None:
+
+def _same_directory(a: str, b: str) -> bool:
+    if os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b)):
+        return True
+    try:  # e.g. 8.3 short names or symlinks on one side
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    except (OSError, ValueError):
+        return False
+
+
+class _EventConnection:
+    """One SSE subscription to ``GET /event`` of one OpenCode instance."""
+
+    def __init__(self, client: httpx.AsyncClient, directory: str | None = None) -> None:
         self._client = client
+        self._directory = directory
         self._response: httpx.Response | None = None
         self._events: AsyncIterator[dict[str, Any]] | None = None
 
@@ -95,6 +121,7 @@ class _EventConnection:
         request = self._client.build_request(
             "GET",
             "/event",
+            params=_where(self._directory),
             headers={"Accept": "text/event-stream"},
             timeout=httpx.Timeout(REQUEST_TIMEOUT_S, read=EVENT_READ_TIMEOUT_S),
         )
@@ -182,6 +209,7 @@ class HttpOpenCodeRuntime:
         self._catalog_at = 0.0
         self._catalog_lock = asyncio.Lock()
         self._active: set[str] = set()
+        self._directories: dict[str, str | None] = {}  # session id -> working directory
         self._tasks: set[asyncio.Future[Any]] = set()
         self._closed = False
 
@@ -218,14 +246,14 @@ class HttpOpenCodeRuntime:
             self._catalog, self._catalog_at = catalog, time.monotonic()
             return catalog
 
-    async def create_session(self, title: str) -> str:
+    async def create_session(self, title: str, directory: str | None = None) -> str:
         body = {
             "title": title.strip() or "SmartRail chat",  # a non-default title skips title-gen
             "agent": AGENT_NAME,
             "permission": [{"permission": "*", "pattern": "*", "action": "deny"}],
         }
         try:
-            response = await self._client.post("/session", json=body)
+            response = await self._client.post("/session", params=_where(directory), json=body)
         except (httpx.HTTPError, RuntimeError) as exc:
             raise RuntimeUnavailableError(f"OpenCode unreachable: {type(exc).__name__}") from exc
         if response.status_code != 200:
@@ -238,13 +266,16 @@ class HttpOpenCodeRuntime:
             raise RuntimeUnavailableError("OpenCode returned an invalid session") from exc
         if not isinstance(session_id, str):
             raise RuntimeUnavailableError("OpenCode returned an invalid session id")
+        self._directories[session_id] = directory
         return session_id
 
     async def abort(self, session_id: str) -> None:
         """Abort any in-flight generation. Idempotent; never raises."""
         try:
             await self._client.post(
-                f"/session/{quote(session_id, safe='')}/abort", timeout=ABORT_TIMEOUT_S
+                f"/session/{quote(session_id, safe='')}/abort",
+                params=_where(self._directories.get(session_id)),
+                timeout=ABORT_TIMEOUT_S,
             )
         except (httpx.HTTPError, RuntimeError) as exc:
             log.warning("abort failed for %s: %s", session_id, type(exc).__name__)
@@ -271,9 +302,15 @@ class HttpOpenCodeRuntime:
             return
         self._active.add(session_id)
         tracker = TurnTracker(session_id)
-        events = _EventConnection(self._client)
+        events: _EventConnection | None = None
         settled = False  # True once nothing of ours can still be running in OpenCode
         try:
+            directory, failure = await self._session_directory(request)
+            if failure is not None:
+                settled = True
+                yield failure
+                return
+            events = _EventConnection(self._client, directory)
             try:
                 await events.open()
             except (*_STREAM_ERRORS, _EventStatusError) as exc:
@@ -281,7 +318,7 @@ class HttpOpenCodeRuntime:
                 yield Failed(ErrorCode.PROVIDER_UNAVAILABLE, _unreachable_message(exc))
                 return
 
-            failure, delivered = await self._send_prompt(request)
+            failure, delivered = await self._send_prompt(request, directory)
             if failure is not None:
                 settled = not delivered
                 yield failure
@@ -309,7 +346,7 @@ class HttpOpenCodeRuntime:
                     await asyncio.sleep(self._reconnect_backoff * reconnects)
                     try:
                         await events.open()
-                        missed = await self._resync(tracker)
+                        missed = await self._resync(tracker, directory)
                     except (*_STREAM_ERRORS, _EventStatusError, ValueError):
                         continue
                     for text in missed:
@@ -337,7 +374,7 @@ class HttpOpenCodeRuntime:
                     return
 
             settled = True  # the session went idle on its own
-            for text in await self._finalize(tracker):
+            for text in await self._finalize(tracker, directory):
                 yield TextDelta(text)
             outcome = await self._outcome(tracker, request)
             yield outcome
@@ -347,7 +384,8 @@ class HttpOpenCodeRuntime:
                 if not settled:
                     await self._abort_shielded(session_id)
             finally:
-                await events.aclose()
+                if events is not None:
+                    await events.aclose()
 
     async def _abort_shielded(self, session_id: str) -> None:
         """Run ``abort`` to completion even if the awaiting task is cancelled meanwhile."""
@@ -356,7 +394,46 @@ class HttpOpenCodeRuntime:
         task.add_done_callback(self._tasks.discard)
         await asyncio.shield(task)
 
-    async def _send_prompt(self, request: CompletionRequest) -> tuple[Failed | None, bool]:
+    async def _session_directory(
+        self, request: CompletionRequest
+    ) -> tuple[str | None, Failed | None]:
+        """The working directory of ``request.session_id`` (``None`` = neutral).
+
+        Known from ``create_session``; otherwise (e.g. after a restart) ``request.directory``,
+        confirmed once against OpenCode's record of the session. A session's directory never
+        changes, so a request naming a different one fails instead of reaching the wrong files.
+        """
+        session_id = request.session_id
+        if session_id in self._directories:
+            known = self._directories[session_id]
+        elif request.directory is None:
+            return None, None  # a neutral session (or an unknown one): no directory parameter
+        else:
+            known = await self._lookup_directory(session_id, request.directory)
+            self._directories[session_id] = known
+        if request.directory is not None and (
+            known is None or not _same_directory(known, request.directory)
+        ):
+            return known, Failed(
+                ErrorCode.RUNTIME_ERROR,
+                "This conversation's session belongs to a different working directory",
+            )
+        return known, None
+
+    async def _lookup_directory(self, session_id: str, requested: str) -> str:
+        try:
+            response = await self._client.get(
+                f"/session/{quote(session_id, safe='')}", params=_where(requested)
+            )
+            actual = response.json().get("directory") if response.status_code == 200 else None
+        except (httpx.HTTPError, ValueError, AttributeError, RuntimeError):
+            actual = None
+        # Unknown to OpenCode (or unreachable): route as requested and let the prompt report it.
+        return actual if isinstance(actual, str) and actual else requested
+
+    async def _send_prompt(
+        self, request: CompletionRequest, directory: str | None
+    ) -> tuple[Failed | None, bool]:
         """POST the prompt once. Returns ``(failure, maybe_delivered)``; never retried."""
         body: dict[str, Any] = {
             "agent": AGENT_NAME,
@@ -367,7 +444,7 @@ class HttpOpenCodeRuntime:
             body["system"] = request.system
         path = f"/session/{quote(request.session_id, safe='')}/prompt_async"
         try:
-            response = await self._client.post(path, json=body)
+            response = await self._client.post(path, params=_where(directory), json=body)
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             return Failed(ErrorCode.PROVIDER_UNAVAILABLE, _unreachable_message(exc)), False
         except (httpx.HTTPError, RuntimeError) as exc:
@@ -383,17 +460,18 @@ class HttpOpenCodeRuntime:
             return None, True
         return _http_failure(response, "prompt"), False
 
-    async def _resync(self, tracker: TurnTracker) -> list[str]:
+    async def _resync(self, tracker: TurnTracker, directory: str | None) -> list[str]:
         """After an SSE reconnect: recover missed text and detect a turn that already finished."""
         session_path = f"/session/{quote(tracker.session_id, safe='')}"
-        status = await self._client.get("/session/status")
+        where = _where(directory)
+        status = await self._client.get("/session/status", params=where)
         busy = False
         if status.status_code == 200:
             statuses = status.json()
             current = statuses.get(tracker.session_id) if isinstance(statuses, dict) else None
             busy = isinstance(current, dict) and current.get("type") in ("busy", "retry")
         messages = await self._client.get(
-            f"{session_path}/message", params={"limit": SNAPSHOT_LIMIT}
+            f"{session_path}/message", params={**where, "limit": SNAPSHOT_LIMIT}
         )
         missed: list[str] = []
         if messages.status_code == 200 and isinstance(messages.json(), list):
@@ -402,13 +480,15 @@ class HttpOpenCodeRuntime:
             tracker.idle = True
         return missed
 
-    async def _finalize(self, tracker: TurnTracker) -> list[str]:
+    async def _finalize(self, tracker: TurnTracker, directory: str | None) -> list[str]:
         """Authoritative read of our assistant message(s): missed suffix, tokens, cost."""
         session_path = f"/session/{quote(tracker.session_id, safe='')}"
         snapshot: list[dict[str, Any]] = []
         for message_id in tracker.assistant_ids:
             try:
-                response = await self._client.get(f"{session_path}/message/{quote(message_id)}")
+                response = await self._client.get(
+                    f"{session_path}/message/{quote(message_id)}", params=_where(directory)
+                )
                 payload = response.json() if response.status_code == 200 else None
             except (httpx.HTTPError, ValueError, RuntimeError):
                 continue

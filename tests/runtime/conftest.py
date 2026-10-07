@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from backend.config import AppConfig
+from backend.contracts.models import ToolAccess
 from backend.contracts.runtime import CompletionRequest
 from backend.runtime.opencode import HttpOpenCodeRuntime
 
@@ -107,5 +108,9 @@ def request(
     system: str = "You are a test persona.",
     text: str = "hi",
     max_tokens: int = 1024,
+    directory: str | None = None,
+    access: ToolAccess = ToolAccess.NONE,
 ) -> CompletionRequest:
-    return CompletionRequest(session_id, provider, model, system, text, max_tokens)
+    return CompletionRequest(
+        session_id, provider, model, system, text, max_tokens, directory, access
+    )

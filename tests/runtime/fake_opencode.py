@@ -1,8 +1,12 @@
-"""A small fake OpenCode HTTP server that replays recorded-shape events (verified vs 1.18.22).
+"""A small fake OpenCode HTTP server that replays recorded-shape events (verified vs 1.18.33).
 
 Served by uvicorn on a random loopback port so SSE streams incrementally, like the real thing.
 Tests script behaviour per ``(provider_id, model_id)`` through ``FakeOpenCode.behaviors`` and
 inspect ``FakeOpenCode.calls`` afterwards.
+
+Like real OpenCode, sessions created with ``?directory=D`` belong to the instance of ``D``: their
+events are only delivered to ``GET /event?directory=D`` subscribers (sessions without a
+directory belong to the server's own cwd, i.e. subscribers without the parameter).
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from starlette.routing import Route
 
 USERNAME = "opencode"
 PASSWORD = "s3cret-test-password"
+NEUTRAL_DIR = "/srv/neutral"  # the fake server's own cwd
 
 _ids = itertools.count(1)
 
@@ -136,6 +141,11 @@ class Call:
     path: str
     body: Any = None
     authorization: str | None = None
+    params: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def directory(self) -> str | None:
+        return self.params.get("directory")
 
 
 @dataclass
@@ -271,9 +281,13 @@ class FakeOpenCode:
     calls: list[Call] = field(default_factory=list)
     messages: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     sessions: list[str] = field(default_factory=list)
+    session_dirs: dict[str, str | None] = field(default_factory=dict)  # None = neutral
     busy: set[str] = field(default_factory=set)
     url: str = ""
-    _subscribers: list[asyncio.Queue[dict[str, Any] | None]] = field(default_factory=list)
+    # (directory, queue) per /event subscriber; directory None = no parameter (neutral)
+    _subscribers: list[tuple[str | None, asyncio.Queue[dict[str, Any] | None]]] = field(
+        default_factory=list
+    )
     _turns: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     _server: uvicorn.Server | None = None
     _task: asyncio.Task[None] | None = None
@@ -291,13 +305,29 @@ class FakeOpenCode:
     def aborts(self) -> list[Call]:
         return self.calls_to("POST", "/abort")
 
+    def add_session(self, sid: str, directory: str | None = None) -> None:
+        """Pretend a session already exists (e.g. created before a runtime restart)."""
+        self.sessions.append(sid)
+        self.session_dirs[sid] = directory
+
     def publish(self, item: dict[str, Any]) -> None:
-        for queue in list(self._subscribers):
-            queue.put_nowait(item)
+        """Deliver to the subscribers of the session's instance (unknown sessions: everyone)."""
+        props = item.get("properties")
+        sid = props.get("sessionID") if isinstance(props, dict) else None
+        scoped = sid in self.session_dirs
+        for directory, queue in list(self._subscribers):
+            if not scoped or directory == self.session_dirs[sid]:
+                queue.put_nowait(item)
 
     # ---- request handlers
     def _record(self, request: Request, body: Any = None) -> Call:
-        call = Call(request.method, request.url.path, body, request.headers.get("authorization"))
+        call = Call(
+            request.method,
+            request.url.path,
+            body,
+            request.headers.get("authorization"),
+            dict(request.query_params),
+        )
         self.calls.append(call)
         return call
 
@@ -319,13 +349,30 @@ class FakeOpenCode:
             return denied
         return JSONResponse(self.providers_payload)
 
+    def _session_info(self, sid: str) -> dict[str, Any]:
+        return {
+            "id": sid,
+            "directory": self.session_dirs.get(sid) or NEUTRAL_DIR,
+            "projectID": "global",
+            "title": "chat",
+        }
+
     async def _create_session(self, request: Request) -> Response:
         body = await request.json()
-        if denied := self._unauthorized(self._record(request, body)):
+        call = self._record(request, body)
+        if denied := self._unauthorized(call):
             return denied
         sid = _id("ses")
-        self.sessions.append(sid)
-        return JSONResponse({"id": sid, "title": body.get("title")})
+        self.add_session(sid, call.directory)
+        return JSONResponse({**self._session_info(sid), "title": body.get("title")})
+
+    async def _get_session(self, request: Request) -> Response:
+        if denied := self._unauthorized(self._record(request)):
+            return denied
+        sid = request.path_params["sid"]
+        if sid not in self.session_dirs:
+            return JSONResponse({"name": "NotFoundError", "data": {"message": "nope"}}, 404)
+        return JSONResponse(self._session_info(sid))
 
     async def _status(self, request: Request) -> Response:
         if denied := self._unauthorized(self._record(request)):
@@ -346,10 +393,12 @@ class FakeOpenCode:
         return JSONResponse({"name": "NotFoundError", "data": {"message": "nope"}}, 404)
 
     async def _events(self, request: Request) -> Response:
-        if denied := self._unauthorized(self._record(request)):
+        call = self._record(request)
+        if denied := self._unauthorized(call):
             return denied
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-        self._subscribers.append(queue)
+        subscriber = (call.directory, queue)
+        self._subscribers.append(subscriber)
         self.connect_order.append("event")
 
         async def stream() -> AsyncIterator[bytes]:
@@ -366,7 +415,7 @@ class FakeOpenCode:
                         return
             finally:
                 with contextlib.suppress(ValueError):
-                    self._subscribers.remove(queue)
+                    self._subscribers.remove(subscriber)
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -424,6 +473,7 @@ class FakeOpenCode:
                 Route("/provider", self._providers),
                 Route("/session", self._create_session, methods=["POST"]),
                 Route("/session/status", self._status),
+                Route("/session/{sid}", self._get_session),
                 Route("/session/{sid}/message", self._messages),
                 Route("/session/{sid}/message/{mid}", self._message),
                 Route("/session/{sid}/prompt_async", self._prompt, methods=["POST"]),
@@ -454,7 +504,7 @@ class FakeOpenCode:
     async def stop(self) -> None:
         for turn in self._turns.values():
             turn.cancel()
-        for queue in list(self._subscribers):
+        for _, queue in list(self._subscribers):
             queue.put_nowait(None)
         if self._server is not None and self._task is not None:
             self._server.should_exit = True
