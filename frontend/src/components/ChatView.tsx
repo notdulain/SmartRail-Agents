@@ -181,6 +181,7 @@ export function ChatView({
 
           <Composer
             key={conversationId}
+            conversationId={conversationId}
             placeholder={placeholder}
             mentionSources={mentionSources}
             labelSources={isGroup}

@@ -24,6 +24,8 @@ export interface MentionSource {
 }
 
 interface Props {
+  /** Drafts are saved per conversation when an id is provided. */
+  conversationId?: string;
   placeholder: string;
   /** A run is active or a message is being sent: the input is locked. */
   disabled: boolean;
@@ -78,6 +80,7 @@ export function findMention(text: string, caret: number, anchor: Anchor | null):
 }
 
 export function Composer({
+  conversationId,
   placeholder,
   disabled,
   running,
@@ -87,7 +90,7 @@ export function Composer({
   onSend,
   onStop,
 }: Props) {
-  const [text, setText] = useState("");
+  const [text, setText] = useState(() => readDraft(conversationId));
   const [caret, setCaret] = useState(0);
   const [attachments, setAttachments] = useState<FileRef[]>([]);
   const [images, setImages] = useState<ImageAttachment[]>([]);
@@ -104,6 +107,10 @@ export function Composer({
   const pendingCaret = useRef<number | null>(null);
   const blurred = useRef(false);
   const listId = useId();
+
+  useEffect(() => {
+    saveDraft(conversationId, text);
+  }, [conversationId, text]);
 
   const mention =
     mentionSources.length > 0 && !disabled ? findMention(text, caret, anchor) : null;
@@ -186,10 +193,11 @@ export function Composer({
     if (!canSend) return;
     const ok = await onSend(text, attachments, images);
     if (ok) {
+      saveDraft(conversationId, "");
       setText("");
       setCaret(0);
-        setAttachments([]);
-        setImages([]);
+      setAttachments([]);
+      setImages([]);
       setAnchor(null);
       setDismissed(null);
       setNotice(null);
@@ -539,6 +547,27 @@ export function Composer({
       </p>
     </div>
   );
+}
+
+const draftKey = (conversationId: string) => `smartrail:draft:${conversationId}`;
+
+function readDraft(conversationId?: string): string {
+  if (!conversationId) return "";
+  try {
+    return window.localStorage.getItem(draftKey(conversationId)) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveDraft(conversationId: string | undefined, text: string): void {
+  if (!conversationId) return;
+  try {
+    if (text) window.localStorage.setItem(draftKey(conversationId), text);
+    else window.localStorage.removeItem(draftKey(conversationId));
+  } catch {
+    // Chat remains usable when browser storage is unavailable or full.
+  }
 }
 
 function formatSize(bytes: number): string {

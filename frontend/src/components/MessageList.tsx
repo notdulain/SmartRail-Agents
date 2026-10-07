@@ -276,6 +276,24 @@ function AgentMessage({
   const streaming = message.status === "streaming";
   const agentId = message.agent?.agent_id;
   const canEdit = message.status === "failed" && needsAgentEdit(message.error_code) && !!agentId;
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+  }, []);
+
+  async function copyResponse() {
+    if (!message.content) return;
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+    copyTimer.current = setTimeout(() => setCopyState("idle"), 2000);
+  }
 
   return (
     <article
@@ -333,6 +351,20 @@ function AgentMessage({
             <span className="streaming-caret">Thinking</span>
           </div>
         )}
+
+        {message.content ? (
+          <div className="mt-1 flex justify-end">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={copyResponse}
+              aria-label={copyState === "idle" ? "Copy response" : copyState === "copied" ? "Copied response" : "Copy failed; try again"}
+              className="text-xs text-muted"
+            >
+              {copyState === "idle" ? "Copy" : copyState === "copied" ? "Copied" : "Copy failed"}
+            </Button>
+          </div>
+        ) : null}
 
         {message.status === "failed" ? (
           <div

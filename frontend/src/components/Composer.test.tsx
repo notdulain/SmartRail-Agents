@@ -12,10 +12,12 @@ function setup(
   sources: MentionSource[] = ONE,
   routes: Record<string, Handler> = { "GET /api/agents/agt_1/files": fakeFileSearch() },
   onSend = vi.fn(async (_text: string, _files: FileRef[], _images?: ImageAttachment[]) => true),
+  conversationId?: string,
 ) {
   const api = mockFetch(routes);
-  render(
+  const view = render(
     <Composer
+      conversationId={conversationId}
       placeholder="Message Driver"
       disabled={false}
       running={false}
@@ -25,7 +27,7 @@ function setup(
       onStop={vi.fn()}
     />,
   );
-  return { api, onSend };
+  return { api, onSend, ...view };
 }
 
 const input = () => screen.getByLabelText("Message");
@@ -33,6 +35,83 @@ const popover = () => screen.queryByRole("listbox", { name: "Files to attach" })
 const fileCalls = (api: ReturnType<typeof mockFetch>) =>
   api.calls.filter((c) => c.path.endsWith("/files"));
 const chips = () => screen.queryByRole("list", { name: "Attachments" });
+
+describe("Composer drafts", () => {
+  it("restores text only for its conversation and clears it after a successful send", async () => {
+    const keyA = "smartrail:draft:cnv_draft_a";
+    const keyB = "smartrail:draft:cnv_draft_b";
+    localStorage.removeItem(keyA);
+    localStorage.removeItem(keyB);
+    const first = setup([], {}, undefined, "cnv_draft_a");
+    await userEvent.type(input(), "A message in progress");
+    expect(localStorage.getItem(keyA)).toBe("A message in progress");
+    first.unmount();
+
+    const second = setup([], {}, undefined, "cnv_draft_b");
+    expect(input()).toHaveValue("");
+    second.unmount();
+
+    const restored = setup([], {}, undefined, "cnv_draft_a");
+    expect(input()).toHaveValue("A message in progress");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(input()).toHaveValue(""));
+    expect(localStorage.getItem(keyA)).toBeNull();
+    restored.unmount();
+  });
+
+  it("keeps the draft after a failed send", async () => {
+    const key = "smartrail:draft:cnv_draft_failed";
+    localStorage.removeItem(key);
+    const onSend = vi.fn(async () => false);
+    const view = setup([], {}, onSend, "cnv_draft_failed");
+    await userEvent.type(input(), "retry me{Enter}");
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
+    expect(localStorage.getItem(key)).toBe("retry me");
+    view.unmount();
+    const restored = setup([], {}, undefined, "cnv_draft_failed");
+    expect(input()).toHaveValue("retry me");
+    restored.unmount();
+    localStorage.removeItem(key);
+  });
+
+  it("saves text without persisting pasted image data", async () => {
+    const key = "smartrail:draft:cnv_draft_image";
+    localStorage.removeItem(key);
+    const view = setup([], {}, undefined, "cnv_draft_image");
+    await userEvent.type(input(), "Look at this");
+    const file = new File(["image"], "shot.png", { type: "image/png" });
+    fireEvent.paste(input(), {
+      clipboardData: {
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        getData: () => "",
+      },
+    });
+    await screen.findByRole("img", { name: "shot.png" });
+    expect(localStorage.getItem(key)).toBe("Look at this");
+    view.unmount();
+    const restored = setup([], {}, undefined, "cnv_draft_image");
+    expect(input()).toHaveValue("Look at this");
+    expect(screen.queryByRole("img", { name: "shot.png" })).not.toBeInTheDocument();
+    restored.unmount();
+    localStorage.removeItem(key);
+  });
+
+  it("remains usable when localStorage throws", async () => {
+    const read = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("blocked"); });
+    const write = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("blocked"); });
+    const remove = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => { throw new Error("blocked"); });
+    try {
+      const { onSend } = setup([], {}, undefined, "cnv_draft_blocked");
+      await userEvent.type(input(), "hello{Enter}");
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith("hello", [], []));
+      await waitFor(() => expect(input()).toHaveValue(""));
+    } finally {
+      read.mockRestore();
+      write.mockRestore();
+      remove.mockRestore();
+    }
+  });
+});
 
 describe("findMention", () => {
   it("finds @tokens at the start or after whitespace only", () => {
