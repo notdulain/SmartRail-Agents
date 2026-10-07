@@ -153,6 +153,8 @@ def opencode_env(config: AppConfig, base: Mapping[str, str] | None = None) -> di
         OPENCODE_SERVER_PASSWORD=config.opencode_password,
         OPENCODE_CONFIG_CONTENT=json.dumps(build_opencode_config()),
         OPENCODE_DISABLE_AUTOUPDATE="1",
+        # Essential now that agents work in user folders: keeps a working directory's
+        # opencode.json, AGENTS.md and CLAUDE.md from reconfiguring or instructing the agent.
         OPENCODE_DISABLE_PROJECT_CONFIG="1",
         # Keep the user's ~/.claude/CLAUDE.md out of every agent's system prompt.
         OPENCODE_DISABLE_CLAUDE_CODE="1",
