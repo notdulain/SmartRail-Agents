@@ -17,6 +17,7 @@ from backend.contracts.models import (
     Conversation,
     ConversationCreate,
     ConversationDetail,
+    DirectoryListing,
     HealthResponse,
     ProvidersResponse,
     Run,
@@ -68,6 +69,15 @@ async def create_agent(body: AgentCreate, svc: Service = Svc):
 @router.patch("/agents/{agent_id}", response_model=Agent, responses=ERRORS)
 async def update_agent(agent_id: str, body: AgentUpdate, svc: Service = Svc):
     return await svc.update_agent(agent_id, body)
+
+
+@router.get("/fs/directories", response_model=DirectoryListing, responses=ERRORS)
+async def list_directories(
+    path: str | None = Query(default=None, max_length=1024), svc: Service = Svc
+):
+    """Sub-directories of ``path`` (default: the user's home) for the working-directory
+    picker. 422 ``validation_error`` if ``path`` is not an existing directory."""
+    return await svc.list_directories(path)
 
 
 @router.get("/providers", response_model=ProvidersResponse)

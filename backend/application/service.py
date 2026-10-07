@@ -13,6 +13,7 @@ from backend.contracts.models import (
     ConversationCreate,
     ConversationDetail,
     ConversationType,
+    DirectoryListing,
     ErrorCode,
     ProvidersResponse,
     Run,
@@ -27,7 +28,7 @@ from backend.contracts.runtime import OpenCodeRuntime, RuntimeUnavailableError
 from .db import Database
 from .errors import AppError, invalid, not_found
 from .export import render_markdown
-from .files import FileProblem, normalize_directory
+from .files import FileProblem, list_directories, normalize_directory
 from .runs import RunManager
 from .store import Store, snapshot_of
 from .util import new_id, utcnow
@@ -173,6 +174,14 @@ class Service:
             agent = agent.model_copy(update=update)
             await self.store.save_agent(agent)
         return agent
+
+    # ------------------------------------------------------------------ filesystem
+
+    async def list_directories(self, path: str | None) -> DirectoryListing:
+        try:
+            return await asyncio.to_thread(list_directories, path)
+        except FileProblem as exc:
+            raise invalid(str(exc)) from None
 
     # ------------------------------------------------------------------ conversations
 
