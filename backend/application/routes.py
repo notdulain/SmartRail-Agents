@@ -124,7 +124,10 @@ async def get_conversation(conversation_id: str, svc: Service = Svc):
 )
 async def send_message(conversation_id: str, body: SendMessageRequest, svc: Service = Svc):
     """Store the user message and start a run (one agent turn for direct chats; one bounded
-    two-round exchange for group discussions). 409 ``run_active`` if a run is in progress."""
+    two-round exchange for group discussions). 409 ``run_active`` if a run is in progress.
+    Attached files are read now and their text is sent with the message; 422
+    ``validation_error`` if one is missing, outside the working directory, binary or too
+    large."""
     return await svc.send_message(conversation_id, body)
 
 
