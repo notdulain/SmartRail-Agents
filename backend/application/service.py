@@ -435,9 +435,9 @@ class Service:
         for msg in messages:
             if msg.agent is not None:
                 spoken.setdefault(msg.agent.agent_id, msg.agent.name)
-        participants = [
-            spoken.get(a) or agents[a].name
+        names = {
+            a: spoken.get(a) or agents[a].name
             for a in conv.participant_ids
             if a in spoken or a in agents
-        ]
-        return render_markdown(conv, messages, participants)
+        }
+        return render_markdown(conv, messages, list(names.values()), names)
