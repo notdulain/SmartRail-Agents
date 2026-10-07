@@ -23,7 +23,8 @@ How one turn works (see ``stream``):
 2. ``POST /session/{id}/prompt_async`` once (never retried, so a prompt is never duplicated)
    with the per-request ``model`` and ``system`` text for the single neutral agent.
 3. Follow the events of that session / our user message with :class:`TurnTracker`, yielding
-   ``TextDelta`` as text arrives. The terminal signal is the session going idle.
+   ``TextDelta`` as text arrives and ``ToolActivity`` when a file-tool call changes state (a
+   tool turn spans several model steps). The terminal signal is the session going idle.
 4. Reconcile with ``GET /session/{id}/message/{id}`` (recovers any missed suffix, gives final
    tokens/cost), then yield exactly one ``Completed`` or ``Failed``.
 
@@ -54,19 +55,19 @@ from backend.contracts.runtime import (
     Failed,
     RuntimeEvent,
     RuntimeUnavailableError,
-    TextDelta,
 )
 
 from .agent_config import AGENT_NAME, agent_for, session_permission
 from .catalog import map_providers
 from .errors import MAX_MESSAGE_CHARS, classify_error, classify_text, is_missing_model
 from .sse import iter_sse_json
-from .turn import TurnTracker
+from .turn import TurnEvent, TurnTracker
 
 log = logging.getLogger("backend.runtime")
 
 # OpenCode's prompt API has no per-request output limit (the model's own limit applies), so the
 # requested ``max_output_tokens`` is enforced here on visible text with a ~4 chars/token estimate.
+# The abort waits while a tool call is in flight, so a file write is never cut off half-way.
 CHARS_PER_TOKEN = 4
 
 CATALOG_TTL_S = 600.0
@@ -78,7 +79,8 @@ EVENT_CONNECT_WAIT_S = 5.0
 EVENT_READ_TIMEOUT_S = 35.0  # OpenCode sends a heartbeat roughly every 10 s
 MAX_RECONNECTS = 3
 RECONNECT_BACKOFF_S = 0.25
-STALL_TIMEOUT_S = 180.0  # no event for this session (heartbeats do not count) -> give up
+# No event for this session (heartbeats do not count; tool and step events do) -> give up.
+STALL_TIMEOUT_S = 180.0
 MAX_TRANSIENT_RETRIES = 2  # OpenCode's own backoff retries tolerated for non-rate-limit errors
 SNAPSHOT_LIMIT = 8
 
@@ -336,6 +338,7 @@ class HttpOpenCodeRuntime:
                 settled = True
                 yield failure
                 return
+            tracker.directory = directory
             access = request.tool_access if directory is not None else ToolAccess.NONE
             if directory is not None:
                 failure = await self._apply_tool_access(session_id, directory, access)
@@ -364,6 +367,8 @@ class HttpOpenCodeRuntime:
                 if time.monotonic() - last_progress > self._stall_timeout:
                     await self._abort_shielded(session_id)
                     settled = True
+                    for item in tracker.interrupt_tools():
+                        yield item
                     yield Failed(
                         ErrorCode.RUNTIME_ERROR, "The model stopped responding (timed out)"
                     )
@@ -372,6 +377,8 @@ class HttpOpenCodeRuntime:
                     event = await events.next()
                 except _STREAM_ERRORS as exc:
                     if self._closed or reconnects >= MAX_RECONNECTS:
+                        for item in tracker.interrupt_tools():
+                            yield item
                         yield Failed(ErrorCode.PROVIDER_UNAVAILABLE, _unreachable_message(exc))
                         return
                     reconnects += 1
@@ -382,15 +389,15 @@ class HttpOpenCodeRuntime:
                         missed = await self._resync(tracker, directory)
                     except (*_STREAM_ERRORS, _EventStatusError, ValueError):
                         continue
-                    for text in missed:
-                        yield TextDelta(text)
+                    for item in missed:
+                        yield item
                     continue
 
                 props = event.get("properties")
                 if isinstance(props, dict) and props.get("sessionID") == session_id:
                     last_progress = time.monotonic()
-                for text in tracker.feed(event):
-                    yield TextDelta(text)
+                for item in tracker.feed(event):
+                    yield item
 
                 if tracker.retry is not None:
                     status, tracker.retry = tracker.retry, None
@@ -398,17 +405,21 @@ class HttpOpenCodeRuntime:
                     if failed is not None:
                         await self._abort_shielded(session_id)
                         settled = True
+                        for item in tracker.interrupt_tools():
+                            yield item
                         yield failed
                         return
-                if cap_chars > 0 and len(tracker.text) >= cap_chars:
+                if cap_chars > 0 and len(tracker.text) >= cap_chars and not tracker.tools_running:
                     await self._abort_shielded(session_id)
                     settled = True
                     yield _truncated_completion(tracker)
                     return
 
             settled = True  # the session went idle on its own
-            for text in await self._finalize(tracker, directory):
-                yield TextDelta(text)
+            for item in await self._finalize(tracker, directory):
+                yield item
+            for item in tracker.interrupt_tools():  # still running once idle: aborted
+                yield item
             outcome = await self._outcome(tracker, request)
             yield outcome
         finally:
@@ -526,7 +537,7 @@ class HttpOpenCodeRuntime:
             return None, True
         return _http_failure(response, "prompt"), False
 
-    async def _resync(self, tracker: TurnTracker, directory: str | None) -> list[str]:
+    async def _resync(self, tracker: TurnTracker, directory: str | None) -> list[TurnEvent]:
         """After an SSE reconnect: recover missed text and detect a turn that already finished."""
         session_path = f"/session/{quote(tracker.session_id, safe='')}"
         where = _where(directory)
@@ -539,14 +550,14 @@ class HttpOpenCodeRuntime:
         messages = await self._client.get(
             f"{session_path}/message", params={**where, "limit": SNAPSHOT_LIMIT}
         )
-        missed: list[str] = []
+        missed: list[TurnEvent] = []
         if messages.status_code == 200 and isinstance(messages.json(), list):
             missed = tracker.apply_snapshot(messages.json())
         if not busy and tracker.started:
             tracker.idle = True
         return missed
 
-    async def _finalize(self, tracker: TurnTracker, directory: str | None) -> list[str]:
+    async def _finalize(self, tracker: TurnTracker, directory: str | None) -> list[TurnEvent]:
         """Authoritative read of our assistant message(s): missed suffix, tokens, cost."""
         session_path = f"/session/{quote(tracker.session_id, safe='')}"
         snapshot: list[dict[str, Any]] = []

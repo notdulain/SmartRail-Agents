@@ -104,6 +104,56 @@ def part_updated(sid: str, mid: str, pid: str, type_: str, text: str = "") -> di
     return event("message.part.updated", sessionID=sid, part=part, time=1)
 
 
+def tool_state(
+    status_: str,
+    input_: dict[str, Any] | None = None,
+    *,
+    title: str | None = None,
+    output: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    """A tool part ``state`` as OpenCode 1.18.33 reports it per status."""
+    if status_ == "pending":
+        return {"status": "pending", "input": {}, "raw": ""}
+    state: dict[str, Any] = {"status": status_, "input": input_ or {}, "time": {"start": 1}}
+    if status_ == "completed":
+        state.update(output=output, title=title or "", metadata={}, time={"start": 1, "end": 2})
+    elif status_ == "error":
+        state.update(error=error, time={"start": 1, "end": 2})
+    return state
+
+
+def tool_part(
+    sid: str, mid: str, pid: str, tool: str, state: dict[str, Any], call_id: str = "call_0"
+) -> dict[str, Any]:
+    return {
+        "id": pid,
+        "messageID": mid,
+        "sessionID": sid,
+        "type": "tool",
+        "tool": tool,
+        "callID": call_id,
+        "state": state,
+    }
+
+
+def tool_updated(sid: str, part: dict[str, Any]) -> dict[str, Any]:
+    return event("message.part.updated", sessionID=sid, part=part, time=1)
+
+
+def step_finish(sid: str, mid: str, reason: str) -> dict[str, Any]:
+    part = {
+        "id": _id("prt"),
+        "messageID": mid,
+        "sessionID": sid,
+        "type": "step-finish",
+        "reason": reason,
+        "tokens": {"input": 10, "output": 2, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+        "cost": 0,
+    }
+    return event("message.part.updated", sessionID=sid, part=part, time=1)
+
+
 def delta(sid: str, mid: str, pid: str, text: str) -> dict[str, Any]:
     return event(
         "message.part.delta", sessionID=sid, messageID=mid, partID=pid, field="text", delta=text
@@ -175,6 +225,25 @@ class TurnContext:
         stored.append({"info": user_info, "parts": []})
         stored.append({"info": info, "parts": parts})
 
+    def store(self, info: dict[str, Any], part: dict[str, Any] | None = None) -> None:
+        """Persist progressively like OpenCode: upsert the message (and one part) by id."""
+        stored = self.fake.messages.setdefault(self.session_id, [])
+        if not any(m["info"]["id"] == self.user_id for m in stored):
+            user_info = {"id": self.user_id, "role": "user", "sessionID": self.session_id}
+            stored.append({"info": user_info, "parts": []})
+        message = next((m for m in stored if m["info"]["id"] == info["id"]), None)
+        if message is None:
+            message = {"info": info, "parts": []}
+            stored.append(message)
+        message["info"] = info
+        if part is not None:
+            parts = message["parts"]
+            index = next((i for i, x in enumerate(parts) if x["id"] == part["id"]), None)
+            if index is None:
+                parts.append(part)
+            else:
+                parts[index] = part
+
 
 Behavior = Callable[[TurnContext], Awaitable[None]]
 
@@ -221,6 +290,86 @@ def text_turn(
             status(sid, "idle"),
             idle(sid),
         )
+
+    return run
+
+
+@dataclass
+class ToolStep:
+    """One tool call of a scripted step: ``outcome`` is ``completed`` or ``error``."""
+
+    tool: str
+    input: dict[str, Any]
+    outcome: str = "completed"
+    output: str = "ok"
+    error: str = ""
+    title: str = ""
+    hold: float = 0.0  # seconds spent running
+    duplicate_updates: bool = True  # OpenCode repeats some updates; they must not re-report
+
+
+def tool_turn(
+    steps: list[list[ToolStep]],
+    final: list[str],
+    *,
+    step_text: list[str] | None = None,
+    delay: float = 0.0,
+    tokens: tuple[int, int, int] = (10, 2, 0),
+) -> Behavior:
+    """A multi-step tool turn: one assistant message per step (tools), then a text reply.
+
+    Every assistant message has our user message as ``parentID``; each step ends with a
+    ``tool-calls`` step-finish; messages and parts are persisted as they change.
+    """
+
+    async def run(ctx: TurnContext) -> None:
+        sid = ctx.session_id
+        await ctx.publish(user_message(sid, ctx.user_id), status(sid, "busy"))
+        ctx.store({"id": ctx.user_id, "role": "user", "sessionID": sid})
+        for index, calls in enumerate([*steps, None]):
+            mid = ctx.assistant_id if index == 0 else _id("msg")
+            info = assistant_info(sid, mid, ctx.user_id)
+            ctx.store(info)
+            await ctx.publish(
+                message_updated(sid, info),
+                status(sid, "busy"),
+                part_updated(sid, mid, _id("prt"), "step-start"),
+            )
+            chunks = final if calls is None else ([step_text[index]] if step_text else [])
+            if chunks and chunks[0]:
+                pid = _id("prt")
+                await ctx.publish(part_updated(sid, mid, pid, "text"))
+                for piece in chunks:
+                    await ctx.publish(delta(sid, mid, pid, piece), delay=delay)
+                text_part = {"id": pid, "messageID": mid, "sessionID": sid, "type": "text"}
+                text_part["text"] = "".join(chunks)
+                ctx.store(info, text_part)
+                await ctx.publish(event("message.part.updated", sessionID=sid, part=text_part))
+            for n, call in enumerate(calls or []):
+                pid = _id("prt")
+                for state in (
+                    tool_state("pending"),
+                    tool_state("running", call.input),
+                    tool_state(
+                        call.outcome,
+                        call.input,
+                        title=call.title,
+                        output=call.output,
+                        error=call.error,
+                    ),
+                ):
+                    part = tool_part(sid, mid, pid, call.tool, state, f"call_{index}_{n}")
+                    ctx.store(info, part)
+                    repeats = 2 if call.duplicate_updates else 1
+                    await ctx.publish(*[tool_updated(sid, part)] * repeats, delay=delay)
+                    if state["status"] == "running" and call.hold:
+                        await asyncio.sleep(call.hold)
+            reason = "stop" if calls is None else "tool-calls"
+            done = assistant_info(sid, mid, ctx.user_id, tokens=tokens, cost=0.0, completed=True)
+            done["finish"] = reason
+            ctx.store(done)
+            await ctx.publish(step_finish(sid, mid, reason), message_updated(sid, done))
+        await ctx.publish(status(sid, "idle"), idle(sid))
 
     return run
 

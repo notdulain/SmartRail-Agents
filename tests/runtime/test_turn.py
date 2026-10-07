@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from backend.contracts.runtime import TextDelta
 from backend.runtime.turn import TurnTracker
 
 from .fake_opencode import (
@@ -18,10 +19,15 @@ from .fake_opencode import (
 S = "ses_1"
 
 
+def texts(events):
+    return [e.text for e in events if isinstance(e, TextDelta)]
+
+
 def feed_all(tracker, events):
+    """Feed events; return the text deltas produced."""
     out: list[str] = []
     for item in events:
-        out += tracker.feed(item)
+        out += texts(tracker.feed(item))
     return out
 
 
@@ -121,7 +127,7 @@ def test_snapshot_recovers_text_and_usage():
             "parts": [{"id": "prt", "messageID": "msg_a", "type": "text", "text": "whole"}],
         },
     ]
-    assert t.apply_snapshot(messages) == ["whole"]
+    assert texts(t.apply_snapshot(messages)) == ["whole"]
     assert t.apply_snapshot(messages) == []  # idempotent
     usage = t.usage()
     assert (usage.input_tokens, usage.output_tokens) == (5, 10)
@@ -152,8 +158,8 @@ def test_deltas_after_a_reconnect_gap_are_not_trusted_until_cumulative_text():
             delta(S, "msg_a", "prt_b", "!"),
         ],
     )
-    assert out == ["one two three", "!"]
-    assert t.text == "one two three!"
+    assert out == ["one two three", "\n\n!"]  # a new text part starts a new paragraph
+    assert t.text == "one two three\n\n!"
 
 
 def test_live_cumulative_text_resynchronises_a_gapped_part():
@@ -206,7 +212,7 @@ def test_snapshot_parts_are_not_extended_by_unordered_deltas():
             "parts": [{"id": "prt_a", "messageID": "msg_a", "type": "text", "text": "abc"}],
         }
     ]
-    out = t.apply_snapshot(snapshot)
+    out = texts(t.apply_snapshot(snapshot))
     # this delta may already be inside the snapshot text ("c") or not: it cannot be placed
     out += feed_all(t, [delta(S, "msg_a", "prt_a", "c"), part_updated(S, "msg_a", "prt_a", "text")])
     out += feed_all(t, [part_updated(S, "msg_a", "prt_a", "text", "abcd")])
