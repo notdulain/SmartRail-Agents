@@ -1,4 +1,20 @@
-"""``OpenCodeRuntime`` implemented against a real OpenCode server (HTTP + SSE, pinned 1.18.22).
+"""``OpenCodeRuntime`` implemented against a real OpenCode server (HTTP + SSE).
+
+Shapes verified against OpenCode 1.18.22 and 1.18.33.
+
+OpenCode runs one *instance* per directory and selects it per request from the ``directory``
+query parameter (then the ``x-opencode-directory`` header, then its own cwd). A session created
+with ``?directory=D`` lives in instance ``D``, and its events are published only on that
+instance's ``GET /event?directory=D`` stream. So every call for a session with a working
+directory (prompt, abort, message reads, ``/session/status``, the event subscription) carries
+that directory; the runtime remembers session -> directory. Sessions without a directory use
+OpenCode's own (neutral) cwd and never send the parameter.
+
+Tool access (see ``agent_config``): every session is created deny-all. A turn picks the OpenCode
+agent for its tool access, and for a session with a directory the runtime first makes sure the
+session's permission ruleset matches that access (``PATCH /session/{id}``, only when it
+changed): OpenCode enforces these rules server-side, both when choosing which tools the model
+is offered and when a tool runs. Sessions without a directory never get tools.
 
 How one turn works (see ``stream``):
 
@@ -7,7 +23,8 @@ How one turn works (see ``stream``):
 2. ``POST /session/{id}/prompt_async`` once (never retried, so a prompt is never duplicated)
    with the per-request ``model`` and ``system`` text for the single neutral agent.
 3. Follow the events of that session / our user message with :class:`TurnTracker`, yielding
-   ``TextDelta`` as text arrives. The terminal signal is the session going idle.
+   ``TextDelta`` as text arrives and ``ToolActivity`` when a file-tool call changes state (a
+   tool turn spans several model steps). The terminal signal is the session going idle.
 4. Reconcile with ``GET /session/{id}/message/{id}`` (recovers any missed suffix, gives final
    tokens/cost), then yield exactly one ``Completed`` or ``Failed``.
 
@@ -21,6 +38,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import os
 import re
 import time
 from collections.abc import AsyncIterator
@@ -30,26 +48,26 @@ from urllib.parse import quote
 import httpx
 
 from backend.config import AppConfig
-from backend.contracts.models import ErrorCode, ProvidersResponse, Usage
+from backend.contracts.models import ErrorCode, ProvidersResponse, ToolAccess, Usage
 from backend.contracts.runtime import (
     Completed,
     CompletionRequest,
     Failed,
     RuntimeEvent,
     RuntimeUnavailableError,
-    TextDelta,
 )
 
-from .agent_config import AGENT_NAME
+from .agent_config import AGENT_NAME, agent_for, session_permission
 from .catalog import map_providers
 from .errors import MAX_MESSAGE_CHARS, classify_error, classify_text, is_missing_model
 from .sse import iter_sse_json
-from .turn import TurnTracker
+from .turn import TurnEvent, TurnTracker
 
 log = logging.getLogger("backend.runtime")
 
 # OpenCode's prompt API has no per-request output limit (the model's own limit applies), so the
 # requested ``max_output_tokens`` is enforced here on visible text with a ~4 chars/token estimate.
+# The abort waits while a tool call is in flight, so a file write is never cut off half-way.
 CHARS_PER_TOKEN = 4
 
 CATALOG_TTL_S = 600.0
@@ -61,7 +79,8 @@ EVENT_CONNECT_WAIT_S = 5.0
 EVENT_READ_TIMEOUT_S = 35.0  # OpenCode sends a heartbeat roughly every 10 s
 MAX_RECONNECTS = 3
 RECONNECT_BACKOFF_S = 0.25
-STALL_TIMEOUT_S = 180.0  # no event for this session (heartbeats do not count) -> give up
+# No event for this session (heartbeats do not count; tool and step events do) -> give up.
+STALL_TIMEOUT_S = 180.0
 MAX_TRANSIENT_RETRIES = 2  # OpenCode's own backoff retries tolerated for non-rate-limit errors
 SNAPSHOT_LIMIT = 8
 
@@ -82,11 +101,43 @@ class _StreamEnded(Exception):
 _STREAM_ERRORS = (httpx.TransportError, httpx.DecodingError, _StreamEnded, TimeoutError)
 
 
-class _EventConnection:
-    """One SSE subscription to ``GET /event``."""
+def _where(directory: str | None) -> dict[str, str]:
+    """Query parameters selecting the OpenCode instance for ``directory`` (none = neutral)."""
+    return {"directory": directory} if directory else {}
 
-    def __init__(self, client: httpx.AsyncClient) -> None:
+
+def _same_directory(a: str, b: str) -> bool:
+    if os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b)):
+        return True
+    try:  # e.g. 8.3 short names or symlinks on one side
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    except (OSError, ValueError):
+        return False
+
+
+def _confinement(worktree: Any, directory: Any) -> str | None:
+    """Where OpenCode's boundary is wider than ``directory``: its path relative to the worktree.
+
+    OpenCode lets tools touch anything inside the session directory *or* its worktree (the git
+    repository root; ``/`` outside git). ``None`` means the boundary already is ``directory``.
+    Raises ``ValueError`` when the layout cannot be confined safely.
+    """
+    if not isinstance(worktree, str) or not isinstance(directory, str) or not directory:
+        raise ValueError("OpenCode reported no working directory")
+    if worktree in ("", "/") or _same_directory(worktree, directory):
+        return None
+    relative = os.path.relpath(directory, worktree)  # ValueError across Windows drives
+    if relative.startswith("..") or os.path.isabs(relative) or any(c in relative for c in "*?"):
+        raise ValueError(f"unexpected OpenCode worktree for {directory!r}")
+    return relative.replace(os.sep, "/")
+
+
+class _EventConnection:
+    """One SSE subscription to ``GET /event`` of one OpenCode instance."""
+
+    def __init__(self, client: httpx.AsyncClient, directory: str | None = None) -> None:
         self._client = client
+        self._directory = directory
         self._response: httpx.Response | None = None
         self._events: AsyncIterator[dict[str, Any]] | None = None
 
@@ -95,6 +146,7 @@ class _EventConnection:
         request = self._client.build_request(
             "GET",
             "/event",
+            params=_where(self._directory),
             headers={"Accept": "text/event-stream"},
             timeout=httpx.Timeout(REQUEST_TIMEOUT_S, read=EVENT_READ_TIMEOUT_S),
         )
@@ -182,6 +234,8 @@ class HttpOpenCodeRuntime:
         self._catalog_at = 0.0
         self._catalog_lock = asyncio.Lock()
         self._active: set[str] = set()
+        self._directories: dict[str, str | None] = {}  # session id -> working directory
+        self._policies: dict[str, list[dict[str, str]]] = {}  # session id -> applied ruleset
         self._tasks: set[asyncio.Future[Any]] = set()
         self._closed = False
 
@@ -218,14 +272,14 @@ class HttpOpenCodeRuntime:
             self._catalog, self._catalog_at = catalog, time.monotonic()
             return catalog
 
-    async def create_session(self, title: str) -> str:
+    async def create_session(self, title: str, directory: str | None = None) -> str:
         body = {
             "title": title.strip() or "SmartRail chat",  # a non-default title skips title-gen
             "agent": AGENT_NAME,
-            "permission": [{"permission": "*", "pattern": "*", "action": "deny"}],
+            "permission": session_permission(ToolAccess.NONE),  # opened per turn, if allowed
         }
         try:
-            response = await self._client.post("/session", json=body)
+            response = await self._client.post("/session", params=_where(directory), json=body)
         except (httpx.HTTPError, RuntimeError) as exc:
             raise RuntimeUnavailableError(f"OpenCode unreachable: {type(exc).__name__}") from exc
         if response.status_code != 200:
@@ -238,13 +292,18 @@ class HttpOpenCodeRuntime:
             raise RuntimeUnavailableError("OpenCode returned an invalid session") from exc
         if not isinstance(session_id, str):
             raise RuntimeUnavailableError("OpenCode returned an invalid session id")
+        self._directories[session_id] = directory
+        if directory is not None:
+            self._policies[session_id] = body["permission"]
         return session_id
 
     async def abort(self, session_id: str) -> None:
         """Abort any in-flight generation. Idempotent; never raises."""
         try:
             await self._client.post(
-                f"/session/{quote(session_id, safe='')}/abort", timeout=ABORT_TIMEOUT_S
+                f"/session/{quote(session_id, safe='')}/abort",
+                params=_where(self._directories.get(session_id)),
+                timeout=ABORT_TIMEOUT_S,
             )
         except (httpx.HTTPError, RuntimeError) as exc:
             log.warning("abort failed for %s: %s", session_id, type(exc).__name__)
@@ -271,9 +330,23 @@ class HttpOpenCodeRuntime:
             return
         self._active.add(session_id)
         tracker = TurnTracker(session_id)
-        events = _EventConnection(self._client)
+        events: _EventConnection | None = None
         settled = False  # True once nothing of ours can still be running in OpenCode
         try:
+            directory, failure = await self._session_directory(request)
+            if failure is not None:
+                settled = True
+                yield failure
+                return
+            tracker.directory = directory
+            access = request.tool_access if directory is not None else ToolAccess.NONE
+            if directory is not None:
+                failure = await self._apply_tool_access(session_id, directory, access)
+                if failure is not None:
+                    settled = True
+                    yield failure
+                    return
+            events = _EventConnection(self._client, directory)
             try:
                 await events.open()
             except (*_STREAM_ERRORS, _EventStatusError) as exc:
@@ -281,7 +354,7 @@ class HttpOpenCodeRuntime:
                 yield Failed(ErrorCode.PROVIDER_UNAVAILABLE, _unreachable_message(exc))
                 return
 
-            failure, delivered = await self._send_prompt(request)
+            failure, delivered = await self._send_prompt(request, directory, access)
             if failure is not None:
                 settled = not delivered
                 yield failure
@@ -294,6 +367,8 @@ class HttpOpenCodeRuntime:
                 if time.monotonic() - last_progress > self._stall_timeout:
                     await self._abort_shielded(session_id)
                     settled = True
+                    for item in tracker.interrupt_tools():
+                        yield item
                     yield Failed(
                         ErrorCode.RUNTIME_ERROR, "The model stopped responding (timed out)"
                     )
@@ -302,24 +377,27 @@ class HttpOpenCodeRuntime:
                     event = await events.next()
                 except _STREAM_ERRORS as exc:
                     if self._closed or reconnects >= MAX_RECONNECTS:
+                        for item in tracker.interrupt_tools():
+                            yield item
                         yield Failed(ErrorCode.PROVIDER_UNAVAILABLE, _unreachable_message(exc))
                         return
                     reconnects += 1
+                    tracker.mark_gap()  # deltas sent while disconnected are lost for good
                     await asyncio.sleep(self._reconnect_backoff * reconnects)
                     try:
                         await events.open()
-                        missed = await self._resync(tracker)
+                        missed = await self._resync(tracker, directory)
                     except (*_STREAM_ERRORS, _EventStatusError, ValueError):
                         continue
-                    for text in missed:
-                        yield TextDelta(text)
+                    for item in missed:
+                        yield item
                     continue
 
                 props = event.get("properties")
                 if isinstance(props, dict) and props.get("sessionID") == session_id:
                     last_progress = time.monotonic()
-                for text in tracker.feed(event):
-                    yield TextDelta(text)
+                for item in tracker.feed(event):
+                    yield item
 
                 if tracker.retry is not None:
                     status, tracker.retry = tracker.retry, None
@@ -327,17 +405,21 @@ class HttpOpenCodeRuntime:
                     if failed is not None:
                         await self._abort_shielded(session_id)
                         settled = True
+                        for item in tracker.interrupt_tools():
+                            yield item
                         yield failed
                         return
-                if cap_chars > 0 and len(tracker.text) >= cap_chars:
+                if cap_chars > 0 and len(tracker.text) >= cap_chars and not tracker.tools_running:
                     await self._abort_shielded(session_id)
                     settled = True
                     yield _truncated_completion(tracker)
                     return
 
             settled = True  # the session went idle on its own
-            for text in await self._finalize(tracker):
-                yield TextDelta(text)
+            for item in await self._finalize(tracker, directory):
+                yield item
+            for item in tracker.interrupt_tools():  # still running once idle: aborted
+                yield item
             outcome = await self._outcome(tracker, request)
             yield outcome
         finally:
@@ -346,7 +428,8 @@ class HttpOpenCodeRuntime:
                 if not settled:
                     await self._abort_shielded(session_id)
             finally:
-                await events.aclose()
+                if events is not None:
+                    await events.aclose()
 
     async def _abort_shielded(self, session_id: str) -> None:
         """Run ``abort`` to completion even if the awaiting task is cancelled meanwhile."""
@@ -355,10 +438,82 @@ class HttpOpenCodeRuntime:
         task.add_done_callback(self._tasks.discard)
         await asyncio.shield(task)
 
-    async def _send_prompt(self, request: CompletionRequest) -> tuple[Failed | None, bool]:
+    async def _session_directory(
+        self, request: CompletionRequest
+    ) -> tuple[str | None, Failed | None]:
+        """The working directory of ``request.session_id`` (``None`` = neutral).
+
+        Known from ``create_session``; otherwise (e.g. after a restart) ``request.directory``,
+        confirmed once against OpenCode's record of the session. A session's directory never
+        changes, so a request naming a different one fails instead of reaching the wrong files.
+        """
+        session_id = request.session_id
+        if session_id in self._directories:
+            known = self._directories[session_id]
+        elif request.directory is None:
+            return None, None  # a neutral session (or an unknown one): no directory parameter
+        else:
+            known = await self._lookup_directory(session_id, request.directory)
+            self._directories[session_id] = known
+        if request.directory is not None and (
+            known is None or not _same_directory(known, request.directory)
+        ):
+            return known, Failed(
+                ErrorCode.RUNTIME_ERROR,
+                "This conversation's session belongs to a different working directory",
+            )
+        return known, None
+
+    async def _lookup_directory(self, session_id: str, requested: str) -> str:
+        try:
+            response = await self._client.get(
+                f"/session/{quote(session_id, safe='')}", params=_where(requested)
+            )
+            actual = response.json().get("directory") if response.status_code == 200 else None
+        except (httpx.HTTPError, ValueError, AttributeError, RuntimeError):
+            actual = None
+        # Unknown to OpenCode (or unreachable): route as requested and let the prompt report it.
+        return actual if isinstance(actual, str) and actual else requested
+
+    async def _apply_tool_access(
+        self, session_id: str, directory: str, access: ToolAccess
+    ) -> Failed | None:
+        """Make the session's permission ruleset match ``access`` before the prompt runs."""
+        where = _where(directory)
+        try:
+            confine_to = None
+            if access is not ToolAccess.NONE:
+                response = await self._client.get("/path", params=where)
+                info = response.json() if response.status_code == 200 else {}
+                if not isinstance(info, dict):
+                    raise ValueError("invalid /path response")
+                confine_to = _confinement(info.get("worktree"), info.get("directory"))
+        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+            log.warning("cannot confine tools for %s: %s", session_id, exc)
+            return Failed(
+                ErrorCode.RUNTIME_ERROR,
+                "Could not confine file tools to the agent's working directory",
+            )
+        rules = session_permission(access, confine_to)
+        if self._policies.get(session_id) == rules:
+            return None
+        try:
+            response = await self._client.patch(
+                f"/session/{quote(session_id, safe='')}", params=where, json={"permission": rules}
+            )
+        except (httpx.HTTPError, RuntimeError) as exc:
+            return Failed(ErrorCode.PROVIDER_UNAVAILABLE, _unreachable_message(exc))
+        if response.status_code != 200:
+            return _http_failure(response, "permission update")
+        self._policies[session_id] = rules
+        return None
+
+    async def _send_prompt(
+        self, request: CompletionRequest, directory: str | None, access: ToolAccess
+    ) -> tuple[Failed | None, bool]:
         """POST the prompt once. Returns ``(failure, maybe_delivered)``; never retried."""
         body: dict[str, Any] = {
-            "agent": AGENT_NAME,
+            "agent": agent_for(access),
             "model": {"providerID": request.provider_id, "modelID": request.model_id},
             "parts": [{"type": "text", "text": request.user_text}],
         }
@@ -366,7 +521,7 @@ class HttpOpenCodeRuntime:
             body["system"] = request.system
         path = f"/session/{quote(request.session_id, safe='')}/prompt_async"
         try:
-            response = await self._client.post(path, json=body)
+            response = await self._client.post(path, params=_where(directory), json=body)
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             return Failed(ErrorCode.PROVIDER_UNAVAILABLE, _unreachable_message(exc)), False
         except (httpx.HTTPError, RuntimeError) as exc:
@@ -382,32 +537,35 @@ class HttpOpenCodeRuntime:
             return None, True
         return _http_failure(response, "prompt"), False
 
-    async def _resync(self, tracker: TurnTracker) -> list[str]:
+    async def _resync(self, tracker: TurnTracker, directory: str | None) -> list[TurnEvent]:
         """After an SSE reconnect: recover missed text and detect a turn that already finished."""
         session_path = f"/session/{quote(tracker.session_id, safe='')}"
-        status = await self._client.get("/session/status")
+        where = _where(directory)
+        status = await self._client.get("/session/status", params=where)
         busy = False
         if status.status_code == 200:
             statuses = status.json()
             current = statuses.get(tracker.session_id) if isinstance(statuses, dict) else None
             busy = isinstance(current, dict) and current.get("type") in ("busy", "retry")
         messages = await self._client.get(
-            f"{session_path}/message", params={"limit": SNAPSHOT_LIMIT}
+            f"{session_path}/message", params={**where, "limit": SNAPSHOT_LIMIT}
         )
-        missed: list[str] = []
+        missed: list[TurnEvent] = []
         if messages.status_code == 200 and isinstance(messages.json(), list):
             missed = tracker.apply_snapshot(messages.json())
         if not busy and tracker.started:
             tracker.idle = True
         return missed
 
-    async def _finalize(self, tracker: TurnTracker) -> list[str]:
+    async def _finalize(self, tracker: TurnTracker, directory: str | None) -> list[TurnEvent]:
         """Authoritative read of our assistant message(s): missed suffix, tokens, cost."""
         session_path = f"/session/{quote(tracker.session_id, safe='')}"
         snapshot: list[dict[str, Any]] = []
         for message_id in tracker.assistant_ids:
             try:
-                response = await self._client.get(f"{session_path}/message/{quote(message_id)}")
+                response = await self._client.get(
+                    f"{session_path}/message/{quote(message_id)}", params=_where(directory)
+                )
                 payload = response.json() if response.status_code == 200 else None
             except (httpx.HTTPError, ValueError, RuntimeError):
                 continue

@@ -1,8 +1,14 @@
-"""A small fake OpenCode HTTP server that replays recorded-shape events (verified vs 1.18.22).
+"""A small fake OpenCode HTTP server that replays recorded-shape events (verified vs 1.18.33).
 
 Served by uvicorn on a random loopback port so SSE streams incrementally, like the real thing.
 Tests script behaviour per ``(provider_id, model_id)`` through ``FakeOpenCode.behaviors`` and
 inspect ``FakeOpenCode.calls`` afterwards.
+
+Like real OpenCode, sessions created with ``?directory=D`` belong to the instance of ``D``: their
+events are only delivered to ``GET /event?directory=D`` subscribers (sessions without a
+directory belong to the server's own cwd, i.e. subscribers without the parameter).
+``PATCH /session/{id}`` *appends* permission rules (as OpenCode 1.18.33 does); ``GET /path``
+reports the worktree configured in ``FakeOpenCode.worktrees`` (default ``/``: not in git).
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ from starlette.routing import Route
 
 USERNAME = "opencode"
 PASSWORD = "s3cret-test-password"
+NEUTRAL_DIR = "/srv/neutral"  # the fake server's own cwd
 
 _ids = itertools.count(1)
 
@@ -97,6 +104,56 @@ def part_updated(sid: str, mid: str, pid: str, type_: str, text: str = "") -> di
     return event("message.part.updated", sessionID=sid, part=part, time=1)
 
 
+def tool_state(
+    status_: str,
+    input_: dict[str, Any] | None = None,
+    *,
+    title: str | None = None,
+    output: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    """A tool part ``state`` as OpenCode 1.18.33 reports it per status."""
+    if status_ == "pending":
+        return {"status": "pending", "input": {}, "raw": ""}
+    state: dict[str, Any] = {"status": status_, "input": input_ or {}, "time": {"start": 1}}
+    if status_ == "completed":
+        state.update(output=output, title=title or "", metadata={}, time={"start": 1, "end": 2})
+    elif status_ == "error":
+        state.update(error=error, time={"start": 1, "end": 2})
+    return state
+
+
+def tool_part(
+    sid: str, mid: str, pid: str, tool: str, state: dict[str, Any], call_id: str = "call_0"
+) -> dict[str, Any]:
+    return {
+        "id": pid,
+        "messageID": mid,
+        "sessionID": sid,
+        "type": "tool",
+        "tool": tool,
+        "callID": call_id,
+        "state": state,
+    }
+
+
+def tool_updated(sid: str, part: dict[str, Any]) -> dict[str, Any]:
+    return event("message.part.updated", sessionID=sid, part=part, time=1)
+
+
+def step_finish(sid: str, mid: str, reason: str) -> dict[str, Any]:
+    part = {
+        "id": _id("prt"),
+        "messageID": mid,
+        "sessionID": sid,
+        "type": "step-finish",
+        "reason": reason,
+        "tokens": {"input": 10, "output": 2, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+        "cost": 0,
+    }
+    return event("message.part.updated", sessionID=sid, part=part, time=1)
+
+
 def delta(sid: str, mid: str, pid: str, text: str) -> dict[str, Any]:
     return event(
         "message.part.delta", sessionID=sid, messageID=mid, partID=pid, field="text", delta=text
@@ -136,6 +193,11 @@ class Call:
     path: str
     body: Any = None
     authorization: str | None = None
+    params: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def directory(self) -> str | None:
+        return self.params.get("directory")
 
 
 @dataclass
@@ -162,6 +224,25 @@ class TurnContext:
         user_info = {"id": self.user_id, "role": "user", "sessionID": self.session_id}
         stored.append({"info": user_info, "parts": []})
         stored.append({"info": info, "parts": parts})
+
+    def store(self, info: dict[str, Any], part: dict[str, Any] | None = None) -> None:
+        """Persist progressively like OpenCode: upsert the message (and one part) by id."""
+        stored = self.fake.messages.setdefault(self.session_id, [])
+        if not any(m["info"]["id"] == self.user_id for m in stored):
+            user_info = {"id": self.user_id, "role": "user", "sessionID": self.session_id}
+            stored.append({"info": user_info, "parts": []})
+        message = next((m for m in stored if m["info"]["id"] == info["id"]), None)
+        if message is None:
+            message = {"info": info, "parts": []}
+            stored.append(message)
+        message["info"] = info
+        if part is not None:
+            parts = message["parts"]
+            index = next((i for i, x in enumerate(parts) if x["id"] == part["id"]), None)
+            if index is None:
+                parts.append(part)
+            else:
+                parts[index] = part
 
 
 Behavior = Callable[[TurnContext], Awaitable[None]]
@@ -209,6 +290,86 @@ def text_turn(
             status(sid, "idle"),
             idle(sid),
         )
+
+    return run
+
+
+@dataclass
+class ToolStep:
+    """One tool call of a scripted step: ``outcome`` is ``completed`` or ``error``."""
+
+    tool: str
+    input: dict[str, Any]
+    outcome: str = "completed"
+    output: str = "ok"
+    error: str = ""
+    title: str = ""
+    hold: float = 0.0  # seconds spent running
+    duplicate_updates: bool = True  # OpenCode repeats some updates; they must not re-report
+
+
+def tool_turn(
+    steps: list[list[ToolStep]],
+    final: list[str],
+    *,
+    step_text: list[str] | None = None,
+    delay: float = 0.0,
+    tokens: tuple[int, int, int] = (10, 2, 0),
+) -> Behavior:
+    """A multi-step tool turn: one assistant message per step (tools), then a text reply.
+
+    Every assistant message has our user message as ``parentID``; each step ends with a
+    ``tool-calls`` step-finish; messages and parts are persisted as they change.
+    """
+
+    async def run(ctx: TurnContext) -> None:
+        sid = ctx.session_id
+        await ctx.publish(user_message(sid, ctx.user_id), status(sid, "busy"))
+        ctx.store({"id": ctx.user_id, "role": "user", "sessionID": sid})
+        for index, calls in enumerate([*steps, None]):
+            mid = ctx.assistant_id if index == 0 else _id("msg")
+            info = assistant_info(sid, mid, ctx.user_id)
+            ctx.store(info)
+            await ctx.publish(
+                message_updated(sid, info),
+                status(sid, "busy"),
+                part_updated(sid, mid, _id("prt"), "step-start"),
+            )
+            chunks = final if calls is None else ([step_text[index]] if step_text else [])
+            if chunks and chunks[0]:
+                pid = _id("prt")
+                await ctx.publish(part_updated(sid, mid, pid, "text"))
+                for piece in chunks:
+                    await ctx.publish(delta(sid, mid, pid, piece), delay=delay)
+                text_part = {"id": pid, "messageID": mid, "sessionID": sid, "type": "text"}
+                text_part["text"] = "".join(chunks)
+                ctx.store(info, text_part)
+                await ctx.publish(event("message.part.updated", sessionID=sid, part=text_part))
+            for n, call in enumerate(calls or []):
+                pid = _id("prt")
+                for state in (
+                    tool_state("pending"),
+                    tool_state("running", call.input),
+                    tool_state(
+                        call.outcome,
+                        call.input,
+                        title=call.title,
+                        output=call.output,
+                        error=call.error,
+                    ),
+                ):
+                    part = tool_part(sid, mid, pid, call.tool, state, f"call_{index}_{n}")
+                    ctx.store(info, part)
+                    repeats = 2 if call.duplicate_updates else 1
+                    await ctx.publish(*[tool_updated(sid, part)] * repeats, delay=delay)
+                    if state["status"] == "running" and call.hold:
+                        await asyncio.sleep(call.hold)
+            reason = "stop" if calls is None else "tool-calls"
+            done = assistant_info(sid, mid, ctx.user_id, tokens=tokens, cost=0.0, completed=True)
+            done["finish"] = reason
+            ctx.store(done)
+            await ctx.publish(step_finish(sid, mid, reason), message_updated(sid, done))
+        await ctx.publish(status(sid, "idle"), idle(sid))
 
     return run
 
@@ -271,9 +432,16 @@ class FakeOpenCode:
     calls: list[Call] = field(default_factory=list)
     messages: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     sessions: list[str] = field(default_factory=list)
+    session_dirs: dict[str, str | None] = field(default_factory=dict)  # None = neutral
+    permissions: dict[str, list[dict[str, str]]] = field(default_factory=dict)  # per session
+    worktrees: dict[str, str] = field(default_factory=dict)  # directory -> git worktree
+    patch_status: int = 200
     busy: set[str] = field(default_factory=set)
     url: str = ""
-    _subscribers: list[asyncio.Queue[dict[str, Any] | None]] = field(default_factory=list)
+    # (directory, queue) per /event subscriber; directory None = no parameter (neutral)
+    _subscribers: list[tuple[str | None, asyncio.Queue[dict[str, Any] | None]]] = field(
+        default_factory=list
+    )
     _turns: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     _server: uvicorn.Server | None = None
     _task: asyncio.Task[None] | None = None
@@ -291,13 +459,29 @@ class FakeOpenCode:
     def aborts(self) -> list[Call]:
         return self.calls_to("POST", "/abort")
 
+    def add_session(self, sid: str, directory: str | None = None) -> None:
+        """Pretend a session already exists (e.g. created before a runtime restart)."""
+        self.sessions.append(sid)
+        self.session_dirs[sid] = directory
+
     def publish(self, item: dict[str, Any]) -> None:
-        for queue in list(self._subscribers):
-            queue.put_nowait(item)
+        """Deliver to the subscribers of the session's instance (unknown sessions: everyone)."""
+        props = item.get("properties")
+        sid = props.get("sessionID") if isinstance(props, dict) else None
+        scoped = sid in self.session_dirs
+        for directory, queue in list(self._subscribers):
+            if not scoped or directory == self.session_dirs[sid]:
+                queue.put_nowait(item)
 
     # ---- request handlers
     def _record(self, request: Request, body: Any = None) -> Call:
-        call = Call(request.method, request.url.path, body, request.headers.get("authorization"))
+        call = Call(
+            request.method,
+            request.url.path,
+            body,
+            request.headers.get("authorization"),
+            dict(request.query_params),
+        )
         self.calls.append(call)
         return call
 
@@ -319,13 +503,51 @@ class FakeOpenCode:
             return denied
         return JSONResponse(self.providers_payload)
 
+    def _session_info(self, sid: str) -> dict[str, Any]:
+        return {
+            "id": sid,
+            "directory": self.session_dirs.get(sid) or NEUTRAL_DIR,
+            "projectID": "global",
+            "title": "chat",
+        }
+
     async def _create_session(self, request: Request) -> Response:
+        body = await request.json()
+        call = self._record(request, body)
+        if denied := self._unauthorized(call):
+            return denied
+        sid = _id("ses")
+        self.add_session(sid, call.directory)
+        self.permissions[sid] = list(body.get("permission") or [])
+        return JSONResponse({**self._session_info(sid), "title": body.get("title")})
+
+    async def _patch_session(self, request: Request) -> Response:
         body = await request.json()
         if denied := self._unauthorized(self._record(request, body)):
             return denied
-        sid = _id("ses")
-        self.sessions.append(sid)
-        return JSONResponse({"id": sid, "title": body.get("title")})
+        sid = request.path_params["sid"]
+        if self.patch_status != 200 or sid not in self.session_dirs:
+            status_code = self.patch_status if self.patch_status != 200 else 404
+            return JSONResponse({"name": "Error", "data": {"message": "nope"}}, status_code)
+        self.permissions.setdefault(sid, []).extend(body.get("permission") or [])
+        return JSONResponse({**self._session_info(sid), "permission": self.permissions[sid]})
+
+    async def _path(self, request: Request) -> Response:
+        call = self._record(request)
+        if denied := self._unauthorized(call):
+            return denied
+        directory = call.directory or NEUTRAL_DIR
+        return JSONResponse(
+            {"directory": directory, "worktree": self.worktrees.get(directory, "/")}
+        )
+
+    async def _get_session(self, request: Request) -> Response:
+        if denied := self._unauthorized(self._record(request)):
+            return denied
+        sid = request.path_params["sid"]
+        if sid not in self.session_dirs:
+            return JSONResponse({"name": "NotFoundError", "data": {"message": "nope"}}, 404)
+        return JSONResponse(self._session_info(sid))
 
     async def _status(self, request: Request) -> Response:
         if denied := self._unauthorized(self._record(request)):
@@ -346,10 +568,12 @@ class FakeOpenCode:
         return JSONResponse({"name": "NotFoundError", "data": {"message": "nope"}}, 404)
 
     async def _events(self, request: Request) -> Response:
-        if denied := self._unauthorized(self._record(request)):
+        call = self._record(request)
+        if denied := self._unauthorized(call):
             return denied
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-        self._subscribers.append(queue)
+        subscriber = (call.directory, queue)
+        self._subscribers.append(subscriber)
         self.connect_order.append("event")
 
         async def stream() -> AsyncIterator[bytes]:
@@ -366,7 +590,7 @@ class FakeOpenCode:
                         return
             finally:
                 with contextlib.suppress(ValueError):
-                    self._subscribers.remove(queue)
+                    self._subscribers.remove(subscriber)
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -424,6 +648,9 @@ class FakeOpenCode:
                 Route("/provider", self._providers),
                 Route("/session", self._create_session, methods=["POST"]),
                 Route("/session/status", self._status),
+                Route("/session/{sid}", self._get_session, methods=["GET"]),
+                Route("/session/{sid}", self._patch_session, methods=["PATCH"]),
+                Route("/path", self._path),
                 Route("/session/{sid}/message", self._messages),
                 Route("/session/{sid}/message/{mid}", self._message),
                 Route("/session/{sid}/prompt_async", self._prompt, methods=["POST"]),
@@ -454,7 +681,7 @@ class FakeOpenCode:
     async def stop(self) -> None:
         for turn in self._turns.values():
             turn.cancel()
-        for queue in list(self._subscribers):
+        for _, queue in list(self._subscribers):
             queue.put_nowait(None)
         if self._server is not None and self._task is not None:
             self._server.should_exit = True

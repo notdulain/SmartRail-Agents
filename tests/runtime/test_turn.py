@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from backend.contracts.runtime import TextDelta
 from backend.runtime.turn import TurnTracker
 
 from .fake_opencode import (
@@ -18,10 +19,15 @@ from .fake_opencode import (
 S = "ses_1"
 
 
+def texts(events):
+    return [e.text for e in events if isinstance(e, TextDelta)]
+
+
 def feed_all(tracker, events):
+    """Feed events; return the text deltas produced."""
     out: list[str] = []
     for item in events:
-        out += tracker.feed(item)
+        out += texts(tracker.feed(item))
     return out
 
 
@@ -121,8 +127,116 @@ def test_snapshot_recovers_text_and_usage():
             "parts": [{"id": "prt", "messageID": "msg_a", "type": "text", "text": "whole"}],
         },
     ]
-    assert t.apply_snapshot(messages) == ["whole"]
+    assert texts(t.apply_snapshot(messages)) == ["whole"]
     assert t.apply_snapshot(messages) == []  # idempotent
     usage = t.usage()
     assert (usage.input_tokens, usage.output_tokens) == (5, 10)
     assert t.reported_cost() == 0.5
+
+
+def test_deltas_after_a_reconnect_gap_are_not_trusted_until_cumulative_text():
+    # Root cause of the old reconnect bug: "one " was lost while disconnected, so appending
+    # the later deltas produced "two three four" and the final cumulative text was rejected.
+    t = TurnTracker(S)
+    out = feed_all(
+        t,
+        [
+            user_message(S, "msg_u"),
+            message_updated(S, assistant_info(S, "msg_a", "msg_u")),
+            part_updated(S, "msg_a", "prt_a", "text"),
+        ],
+    )
+    t.mark_gap()  # "one " is published while we reconnect
+    out += feed_all(
+        t,
+        [
+            delta(S, "msg_a", "prt_a", "two "),
+            delta(S, "msg_a", "prt_a", "three"),
+            part_updated(S, "msg_a", "prt_a", "text", "one two three"),
+            # a later part streams normally again
+            part_updated(S, "msg_a", "prt_b", "text"),
+            delta(S, "msg_a", "prt_b", "!"),
+        ],
+    )
+    assert out == ["one two three", "\n\n!"]  # a new text part starts a new paragraph
+    assert t.text == "one two three\n\n!"
+
+
+def test_live_cumulative_text_resynchronises_a_gapped_part():
+    t = TurnTracker(S)
+    feed_all(
+        t,
+        [
+            user_message(S, "msg_u"),
+            message_updated(S, assistant_info(S, "msg_a", "msg_u")),
+            part_updated(S, "msg_a", "prt_a", "text"),
+            delta(S, "msg_a", "prt_a", "ab"),
+        ],
+    )
+    t.mark_gap()
+    out = feed_all(
+        t,
+        [
+            part_updated(S, "msg_a", "prt_a", "text", "abcd"),
+            delta(S, "msg_a", "prt_a", "ef"),  # follows "abcd" on the same connection
+        ],
+    )
+    assert out == ["cd", "ef"]
+    assert t.text == "abcdef"
+
+
+def test_deltas_of_a_part_whose_start_was_missed_never_duplicate_text():
+    # The part's start event was lost; its deltas arrive first, then the cumulative text.
+    t = TurnTracker(S)
+    out = feed_all(
+        t,
+        [
+            user_message(S, "msg_u"),
+            message_updated(S, assistant_info(S, "msg_a", "msg_u")),
+            delta(S, "msg_a", "prt_a", "three "),
+            delta(S, "msg_a", "prt_a", "four"),
+            part_updated(S, "msg_a", "prt_a", "text", "one two three four"),
+        ],
+    )
+    assert out == ["one two three four"]
+    assert t.text == "one two three four"
+
+
+def test_snapshot_parts_are_not_extended_by_unordered_deltas():
+    t = TurnTracker(S)
+    feed_all(t, [user_message(S, "msg_u"), message_updated(S, assistant_info(S, "msg_a", "msg_u"))])
+    t.mark_gap()
+    snapshot = [
+        {
+            "info": assistant_info(S, "msg_a", "msg_u"),
+            "parts": [{"id": "prt_a", "messageID": "msg_a", "type": "text", "text": "abc"}],
+        }
+    ]
+    out = texts(t.apply_snapshot(snapshot))
+    # this delta may already be inside the snapshot text ("c") or not: it cannot be placed
+    out += feed_all(t, [delta(S, "msg_a", "prt_a", "c"), part_updated(S, "msg_a", "prt_a", "text")])
+    out += feed_all(t, [part_updated(S, "msg_a", "prt_a", "text", "abcd")])
+    assert out == ["abc", "d"]
+    assert t.text == "abcd"
+
+
+def test_held_events_replayed_across_a_gap_stay_gap_aware():
+    t = TurnTracker(S)
+    feed_all(
+        t,
+        [
+            user_message(S, "msg_u"),
+            part_updated(S, "msg_a", "prt_a", "text"),
+            delta(S, "msg_a", "prt_a", "one "),
+        ],
+    )
+    t.mark_gap()  # "two " lost
+    out = feed_all(
+        t,
+        [
+            delta(S, "msg_a", "prt_a", "three"),
+            message_updated(S, assistant_info(S, "msg_a", "msg_u")),
+            part_updated(S, "msg_a", "prt_a", "text", "one two three"),
+        ],
+    )
+    assert out == ["one ", "two three"]
