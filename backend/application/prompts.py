@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 from backend.contracts.models import Message, MessageRole, MessageStatus
 
@@ -48,23 +48,63 @@ def speaker_label(msg: Message) -> str:
     return msg.speaker_name
 
 
-def format_transcript(messages: Sequence[Message]) -> str:
-    """Render messages oldest-first, keeping the newest ones that fit the cap."""
-    blocks: list[str] = []
+OMITTED = "[earlier messages omitted]"
+
+
+def _attr(value: str) -> str:
+    return value.replace("&", "&amp;").replace('"', "&quot;")
+
+
+def render_attachments(files: Sequence[tuple[str, str | None, str]]) -> str:
+    """Attached files as sent to the model: one ``<attached_file>`` block per
+    (relative path, owning agent name or None, text)."""
+    blocks = []
+    for path, agent, text in files:
+        attrs = f'path="{_attr(path)}"'
+        if agent:
+            attrs += f' agent="{_attr(agent)}"'
+        body = text if text.endswith("\n") or not text else text + "\n"
+        blocks.append(f"<attached_file {attrs}>\n{body}</attached_file>")
+    return "\n\n".join(blocks)
+
+
+def with_attachments(content: str, attachments_text: str | None) -> str:
+    return f"{content}\n\n{attachments_text}" if attachments_text else content
+
+
+def format_transcript(
+    messages: Sequence[Message],
+    attachments: Mapping[str, str] | None = None,
+    keep: Collection[str] = (),
+) -> str:
+    """Render messages oldest-first, keeping the newest ones that fit the cap.
+
+    ``attachments`` maps message IDs to their rendered attached files, shown with the
+    message. Messages in ``keep`` (the current run's user message) are always included in
+    full and do not count against the cap, so every participant sees the attached files.
+    """
+    attachments = attachments or {}
+    blocks: list[tuple[str, str]] = []
     for msg in messages:
         if msg.status in (MessageStatus.STREAMING, MessageStatus.FAILED) and not msg.content:
             continue
         if not msg.content.strip():
             continue
-        blocks.append(f"[{speaker_label(msg)}]: {msg.content.strip()}")
+        block = f"[{speaker_label(msg)}]: {msg.content.strip()}"
+        blocks.append((msg.id, with_attachments(block, attachments.get(msg.id))))
     kept: list[str] = []
     total = 0
-    for block in reversed(blocks):
-        if total + len(block) > MAX_TRANSCRIPT_CHARS and kept:
-            kept.append("[earlier messages omitted]")
-            break
-        kept.append(block)
-        total += len(block)
+    capped = False
+    for msg_id, block in reversed(blocks):
+        if msg_id in keep:
+            kept.append(block)
+        elif not capped and (total == 0 or total + len(block) <= MAX_TRANSCRIPT_CHARS):
+            kept.append(block)  # the newest message always fits
+            total += len(block)
+        else:
+            capped = True
+            if not kept or kept[-1] != OMITTED:
+                kept.append(OMITTED)
     return "\n\n".join(reversed(kept))
 
 

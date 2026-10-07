@@ -80,7 +80,10 @@ class DiscussionDriver:
             conversation.id, speaker.agent_id, speaker.working_directory
         )
         unseen = await store.messages_after(conversation.id, found.seen_ord if found else 0)
-        transcript = prompts.format_transcript([m for _, m in unseen])
+        messages = [m for _, m in unseen]
+        files = await store.attachment_texts([m.id for m in messages if m.attachments])
+        keep = {active.user_message.id} if active.user_message else set()
+        transcript = prompts.format_transcript(messages, files, keep)
 
         reply_to_id: str | None = None
         if turn.stage == 0:

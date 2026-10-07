@@ -8,6 +8,7 @@ from backend.config import AppConfig
 from backend.contracts.models import (
     Agent,
     AgentCreate,
+    AgentSnapshot,
     AgentUpdate,
     Conversation,
     ConversationCreate,
@@ -15,6 +16,7 @@ from backend.contracts.models import (
     ConversationType,
     DirectoryListing,
     ErrorCode,
+    FileRef,
     FileSearchResponse,
     ProvidersResponse,
     Run,
@@ -26,14 +28,17 @@ from backend.contracts.models import (
 )
 from backend.contracts.runtime import OpenCodeRuntime, RuntimeUnavailableError
 
+from . import prompts
 from .db import Database
 from .errors import AppError, invalid, not_found
 from .export import render_markdown
 from .files import (
+    MAX_ATTACHMENTS_TOTAL_BYTES,
     FileProblem,
     directory_exists,
     list_directories,
     normalize_directory,
+    read_attachment,
     search_files,
 )
 from .runs import RunManager
@@ -288,6 +293,8 @@ class Service:
         coordinator = None
         if conv.type is ConversationType.GROUP:
             coordinator = await self._coordinator(settings)
+        await self._check_directories([*snapshots, *([coordinator] if coordinator else [])])
+        refs, attachments_text = await self._read_attachments(conv, agents, body.attachments)
 
         run, user_message = await self.runs.start_run(
             conv,
@@ -297,8 +304,63 @@ class Service:
             brief=settings.project_brief,
             participant_max_tokens=settings.participant_max_tokens,
             coordinator_max_tokens=settings.coordinator_max_tokens,
+            attachments=refs,
+            attachments_text=attachments_text,
         )
         return SendMessageResponse(run_id=run.id, user_message_id=user_message.id)
+
+    async def _check_directories(self, speakers: list[AgentSnapshot]) -> None:
+        for speaker in speakers:
+            root = speaker.working_directory
+            if root and not await asyncio.to_thread(directory_exists, root):
+                raise invalid(
+                    f"The working directory of agent {speaker.name!r} no longer exists: {root}. "
+                    "Edit the agent to choose another one.",
+                    speaker.agent_id,
+                )
+
+    async def _read_attachments(
+        self, conv: Conversation, agents: dict[str, Agent], wanted: list[FileRef]
+    ) -> tuple[list[FileRef], str | None]:
+        """Read attached files once, now; return the refs and their rendering for the model."""
+        refs: list[FileRef] = []
+        files: list[tuple[str, str | None, str]] = []
+        total = 0
+        for ref in wanted:
+            agent = agents.get(ref.agent_id)
+            if agent is None or ref.agent_id not in conv.participant_ids:
+                raise invalid(
+                    f"Cannot attach {ref.path!r}: agent {ref.agent_id!r} is not a participant "
+                    "of this conversation."
+                )
+            if not agent.working_directory:
+                raise invalid(
+                    f"Cannot attach {ref.path!r}: agent {agent.name!r} has no working directory.",
+                    agent.id,
+                )
+            try:
+                path, text, size = await asyncio.to_thread(
+                    read_attachment, agent.working_directory, ref.path
+                )
+            except FileProblem as exc:
+                raise invalid(
+                    f"Cannot attach {ref.path!r} from {agent.name}'s working directory: {exc}.",
+                    agent.id,
+                ) from None
+            clean = FileRef(agent_id=agent.id, path=path)
+            if clean in refs:
+                continue  # the same file twice is attached once
+            total += size
+            if total > MAX_ATTACHMENTS_TOTAL_BYTES:
+                raise invalid(
+                    f"Cannot attach {ref.path!r}: attached files may not exceed "
+                    f"{MAX_ATTACHMENTS_TOTAL_BYTES // 1024} KB in total.",
+                    agent.id,
+                )
+            refs.append(clean)
+            owner = agent.name if conv.type is ConversationType.GROUP else None
+            files.append((path, owner, text))
+        return refs, (prompts.render_attachments(files) if files else None)
 
     async def _coordinator(self, settings: Settings):
         coord_id = settings.coordinator_agent_id

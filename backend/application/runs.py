@@ -20,6 +20,7 @@ from backend.contracts.models import (
     Conversation,
     ConversationType,
     ErrorCode,
+    FileRef,
     Message,
     MessageCompletedEvent,
     MessageDeltaEvent,
@@ -110,6 +111,7 @@ class ActiveRun:
     next_seq: int = 1
     conversation: Conversation | None = None
     user_message: Message | None = None
+    attachments_text: str | None = None  # attached files as rendered at send time
     brief: str = ""
     participant_max_tokens: int = 1024
     coordinator_max_tokens: int = 2048
@@ -186,6 +188,8 @@ class RunManager:
         brief: str,
         participant_max_tokens: int,
         coordinator_max_tokens: int,
+        attachments: Sequence[FileRef] = (),
+        attachments_text: str | None = None,
     ) -> tuple[Run, Message]:
         async with self._lock:
             if self.active is not None:
@@ -207,12 +211,13 @@ class RunManager:
                 speaker_name="You",
                 content=content,
                 status=MessageStatus.COMPLETE,
+                attachments=list(attachments),
                 created_at=now,
             )
             await self.store.db.tx(
                 [
                     self.store.stmt_insert_run(run),
-                    self.store.stmt_insert_message(user_message),
+                    self.store.stmt_insert_message(user_message, attachments_text),
                     self.store.stmt_touch_conversation(conversation.id, now),
                 ]
             )
@@ -220,6 +225,7 @@ class RunManager:
                 run=run,
                 conversation=conversation,
                 user_message=user_message,
+                attachments_text=attachments_text,
                 brief=brief,
                 participant_max_tokens=participant_max_tokens,
                 coordinator_max_tokens=coordinator_max_tokens,
@@ -262,7 +268,7 @@ class RunManager:
     async def _run_direct(self, active: ActiveRun) -> TurnOutcome:
         assert active.user_message is not None and active.conversation is not None
         speaker = active.run.participants[0]
-        user_text = active.user_message.content
+        user_text = prompts.with_attachments(active.user_message.content, active.attachments_text)
         conv_id = active.conversation.id
         session = await self.store.usable_session(
             conv_id, speaker.agent_id, speaker.working_directory
@@ -272,7 +278,8 @@ class RunManager:
             # give it the earlier visible transcript so the conversation carries on.
             user_ord = await self.store.message_ord(active.user_message.id)
             earlier = [m for o, m in await self.store.messages_after(conv_id, 0) if o < user_ord]
-            user_text = prompts.with_history(prompts.format_transcript(earlier), user_text)
+            files = await self.store.attachment_texts([m.id for m in earlier if m.attachments])
+            user_text = prompts.with_history(prompts.format_transcript(earlier, files), user_text)
         return await self.run_turn(
             active,
             speaker=speaker,

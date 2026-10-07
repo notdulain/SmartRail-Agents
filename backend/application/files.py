@@ -8,13 +8,14 @@ Functions raise :class:`FileProblem` with a user-facing message; the service tur
 from __future__ import annotations
 
 import os
+import re
 import stat
 import string
 import sys
 import time
 from collections import deque
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from backend.contracts.models import DirectoryEntry, DirectoryListing, FileEntry
 
@@ -62,6 +63,10 @@ IGNORED_DIRS = frozenset(
     }
 )
 IGNORED_FILES = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
+
+# Attachment limits (bytes): per file and for all files of one message.
+MAX_ATTACHMENT_BYTES = 200 * 1024
+MAX_ATTACHMENTS_TOTAL_BYTES = 1024 * 1024
 
 
 class FileProblem(ValueError):
@@ -280,6 +285,62 @@ def search_files(root: str, query: str, limit: int) -> tuple[list[FileEntry], bo
     return [
         FileEntry(path=f.path, is_dir=f.is_dir, size=f.size) for f in matches[:limit]
     ], truncated
+
+
+# ----------------------------------------------------------------------- attachments
+
+
+def clean_relative_path(rel: str) -> str:
+    """Validate a user-supplied relative path and return it with ``/`` separators.
+
+    Rejects absolute paths (POSIX or Windows: drive, UNC, rooted) and any ``..`` component.
+    """
+    if not rel.strip() or "\x00" in rel:
+        raise FileProblem("the path is empty or invalid")
+    if PurePosixPath(rel).is_absolute() or PureWindowsPath(rel).anchor:
+        raise FileProblem("the path must be relative to the working directory")
+    parts = [p for p in re.split(r"[\\/]+", rel) if p not in ("", ".")]
+    if not parts:
+        raise FileProblem("the path does not name a file")
+    if ".." in parts:
+        raise FileProblem("the path must stay inside the working directory")
+    return "/".join(parts)
+
+
+def read_attachment(
+    root: str, rel: str, max_bytes: int = MAX_ATTACHMENT_BYTES
+) -> tuple[str, str, int]:
+    """Read a UTF-8 text file inside ``root``; return (clean path, text, size in bytes).
+
+    The resolved target (after following any links) must lie inside the resolved root.
+    """
+    clean = clean_relative_path(rel)
+    try:
+        root_path = Path(root).resolve(strict=True)
+        target = root_path.joinpath(*clean.split("/")).resolve(strict=True)
+    except FileNotFoundError:
+        raise FileProblem("the file does not exist") from None
+    except (OSError, RuntimeError) as exc:
+        reason = _reason(exc) if isinstance(exc, OSError) else "link loop"
+        raise FileProblem(f"the file cannot be opened ({reason})") from None
+    if not is_inside(target, root_path) or target == root_path:
+        raise FileProblem("the path resolves outside the working directory")
+    try:
+        if not target.is_file():
+            raise FileProblem("it is not a regular file")
+        with open(target, "rb") as fh:
+            data = fh.read(max_bytes + 1)
+    except OSError as exc:
+        raise FileProblem(f"the file cannot be read ({_reason(exc)})") from None
+    if len(data) > max_bytes:
+        raise FileProblem(f"the file is larger than {max_bytes // 1024} KB")
+    if b"\x00" in data:
+        raise FileProblem("it looks like a binary file; only text files can be attached")
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise FileProblem("it is not UTF-8 text; only text files can be attached") from None
+    return clean, text, len(data)
 
 
 def _reason(exc: OSError) -> str:
