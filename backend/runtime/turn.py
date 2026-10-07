@@ -17,6 +17,13 @@ Rules:
   compaction summaries are never surfaced.
 * ``message.part.updated`` carries the cumulative part text, so any delta that was missed
   (late subscription, reconnect) is recovered as a suffix without duplicating text.
+* Deltas carry no sequence number, so they are only trusted while they extend a part that was
+  followed without interruption since its last cumulative text. After an SSE reconnect
+  (:meth:`TurnTracker.mark_gap`) deltas of the parts in progress may have been lost, so those
+  parts ignore further deltas and only grow from cumulative text (``message.part.updated`` at
+  the end of the part, or a snapshot). Deltas for a part whose ``message.part.updated`` was
+  never seen are ignored for the same reason. Emitted text is therefore always a prefix of
+  OpenCode's real text: never a gap, never a duplicate.
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ from typing import Any
 from backend.contracts.models import Usage
 
 _HELD_LIMIT = 200
+_GAP = {"type": "smartrail.gap"}  # marker in the held-event queue: a reconnect happened here
 # MessageOutputLengthError just means the model hit its own output limit: a normal completion.
 _NON_FAILURES = frozenset({"MessageAbortedError", "MessageOutputLengthError"})
 
@@ -36,6 +44,7 @@ class _Part:
     message_id: str
     text: str = ""
     ignored: bool = False
+    gapped: bool = False  # deltas may have been missed: grow only from cumulative text
 
 
 def _int(value: Any) -> int:
@@ -54,7 +63,6 @@ class TurnTracker:
         self.text = ""  # everything emitted as text so far
         self._assistants: dict[str, dict[str, Any]] = {}
         self._parts: dict[str, _Part] = {}
-        self._pending: dict[str, tuple[str, list[str]]] = {}
         self._held: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------ accessors
@@ -100,6 +108,13 @@ class TurnTracker:
         return None
 
     # ------------------------------------------------------------------ feeding
+
+    def mark_gap(self) -> None:
+        """The event stream was interrupted (reconnect): events may have been lost here."""
+        for state in self._parts.values():
+            state.gapped = True
+        if self._held and len(self._held) < _HELD_LIMIT:
+            self._held.append(_GAP)
 
     def feed(self, event: dict[str, Any]) -> list[str]:
         """Consume one event; return the new text deltas (possibly empty)."""
@@ -200,7 +215,10 @@ class TurnTracker:
         if first_time and self._held:
             held, self._held = self._held, []
             for event in held:
-                deltas += self.feed(event)
+                if event is _GAP:
+                    self.mark_gap()
+                else:
+                    deltas += self.feed(event)
         return deltas
 
     def _known_message(self, message_id: Any) -> bool:
@@ -218,9 +236,11 @@ class TurnTracker:
             if message_id != self.user_message_id:
                 self._hold("message.part.updated", {"sessionID": self.session_id, "part": part})
             return []
-        return self._apply_part(part)
+        return self._apply_part(part, live=True)
 
-    def _apply_part(self, part: dict[str, Any]) -> list[str]:
+    def _apply_part(self, part: dict[str, Any], *, live: bool = False) -> list[str]:
+        """Apply a part's cumulative state. ``live``: it came in order on the event stream
+        (so later deltas continue it); otherwise it came from a snapshot (unordered)."""
         part_id = part.get("id")
         message_id = part.get("messageID")
         if not isinstance(part_id, str) or not isinstance(message_id, str):
@@ -229,19 +249,16 @@ class TurnTracker:
         if state is None:
             if part.get("type") != "text" or part.get("synthetic") or part.get("ignored"):
                 self._parts[part_id] = _Part(message_id, ignored=True)
-                self._pending.pop(part_id, None)
                 return []
-            state = _Part(message_id)
+            state = _Part(message_id, gapped=not live)
             self._parts[part_id] = state
-            deltas = self._grow(state, part.get("text"))
-            pending = self._pending.pop(part_id, None)
-            if pending is not None and pending[0] == message_id:
-                for delta in pending[1]:
-                    deltas += self._append(state, delta)
-            return deltas
-        if state.ignored or part.get("type") != "text":
+        elif state.ignored or part.get("type") != "text":
             return []
-        return self._grow(state, part.get("text"))
+        full_text = part.get("text")
+        deltas = self._grow(state, full_text)
+        if live and state.text == full_text:
+            state.gapped = False  # in sync again: following deltas extend this exact text
+        return deltas
 
     def _grow(self, state: _Part, full_text: Any) -> list[str]:
         """The part now holds ``full_text`` (cumulative); emit only what is new."""
@@ -274,11 +291,8 @@ class TurnTracker:
                 self._hold("message.part.delta", props)
             return []
         state = self._parts.get(part_id)
-        if state is None:
-            held_message, deltas = self._pending.setdefault(part_id, (message_id, []))
-            if held_message == message_id:
-                deltas.append(delta)
-            return []
-        if state.ignored:
+        # Unknown part: its start (and maybe earlier deltas) was lost, so this delta has no
+        # known offset. The cumulative text recovers it later.
+        if state is None or state.ignored or state.gapped:
             return []
         return self._append(state, delta)

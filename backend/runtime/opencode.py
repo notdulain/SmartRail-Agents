@@ -305,6 +305,7 @@ class HttpOpenCodeRuntime:
                         yield Failed(ErrorCode.PROVIDER_UNAVAILABLE, _unreachable_message(exc))
                         return
                     reconnects += 1
+                    tracker.mark_gap()  # deltas sent while disconnected are lost for good
                     await asyncio.sleep(self._reconnect_backoff * reconnects)
                     try:
                         await events.open()
