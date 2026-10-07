@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from backend.config import AppConfig
 from backend.contracts.models import (
     Agent,
@@ -18,15 +20,21 @@ from backend.contracts.models import (
     SendMessageResponse,
     Settings,
     SettingsUpdate,
+    ToolAccess,
 )
 from backend.contracts.runtime import OpenCodeRuntime, RuntimeUnavailableError
 
 from .db import Database
 from .errors import AppError, invalid, not_found
 from .export import render_markdown
+from .files import FileProblem, normalize_directory
 from .runs import RunManager
 from .store import Store, snapshot_of
 from .util import new_id, utcnow
+
+_NEEDS_DIRECTORY = (
+    "File tools need a working directory. Choose a working directory or set tool access to none."
+)
 
 
 class Service:
@@ -95,7 +103,18 @@ class Service:
     async def list_agents(self, include_archived: bool) -> list[Agent]:
         return await self.store.list_agents(include_archived)
 
+    async def _working_directory(self, raw: str, agent_id: str | None = None) -> str:
+        try:
+            return await asyncio.to_thread(normalize_directory, raw)
+        except FileProblem as exc:
+            raise invalid(str(exc), agent_id) from None
+
     async def create_agent(self, body: AgentCreate) -> Agent:
+        directory = None
+        if body.working_directory is not None and body.working_directory.strip():
+            directory = await self._working_directory(body.working_directory)
+        if body.tool_access is not ToolAccess.NONE and directory is None:
+            raise invalid(_NEEDS_DIRECTORY)
         await self._validate_model(body.provider_id, body.model_id)
         now = utcnow()
         agent = Agent(
@@ -104,6 +123,8 @@ class Service:
             persona=body.persona,
             provider_id=body.provider_id,
             model_id=body.model_id,
+            working_directory=directory,
+            tool_access=body.tool_access,
             revision=1,
             archived=False,
             created_at=now,
@@ -124,6 +145,16 @@ class Service:
             if not changes["name"]:
                 raise invalid("name must not be blank", agent_id)
         archived = changes.pop("archived", None)
+        if "working_directory" in changes:
+            raw = changes["working_directory"]
+            # "" clears the directory; anything else must be an existing directory.
+            changes["working_directory"] = (
+                await self._working_directory(raw, agent_id) if raw.strip() else None
+            )
+        directory = changes.get("working_directory", agent.working_directory)
+        access = changes.get("tool_access", agent.tool_access)
+        if access is not ToolAccess.NONE and directory is None:
+            raise invalid(_NEEDS_DIRECTORY, agent_id)
 
         edited = {k: v for k, v in changes.items() if getattr(agent, k) != v}
         if "provider_id" in changes or "model_id" in changes:

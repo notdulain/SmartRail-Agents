@@ -24,6 +24,7 @@ from backend.contracts.models import (
     Run,
     RunStatus,
     Settings,
+    ToolAccess,
     Usage,
 )
 
@@ -39,6 +40,8 @@ def snapshot_of(agent: Agent) -> AgentSnapshot:
         provider_id=agent.provider_id,
         model_id=agent.model_id,
         revision=agent.revision,
+        working_directory=agent.working_directory,
+        tool_access=agent.tool_access,
     )
 
 
@@ -49,6 +52,8 @@ def _agent(row: aiosqlite.Row) -> Agent:
         persona=row["persona"],
         provider_id=row["provider_id"],
         model_id=row["model_id"],
+        working_directory=row["working_directory"],
+        tool_access=ToolAccess(row["tool_access"]),
         revision=row["revision"],
         archived=bool(row["archived"]),
         created_at=parse_dt(row["created_at"]),
@@ -154,14 +159,17 @@ class Store:
 
     async def insert_agent(self, agent: Agent) -> None:
         await self.db.execute(
-            "INSERT INTO agents (id, name, persona, provider_id, model_id, revision, archived,"
-            " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO agents (id, name, persona, provider_id, model_id, working_directory,"
+            " tool_access, revision, archived, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 agent.id,
                 agent.name,
                 agent.persona,
                 agent.provider_id,
                 agent.model_id,
+                agent.working_directory,
+                agent.tool_access.value,
                 agent.revision,
                 int(agent.archived),
                 iso(agent.created_at),
@@ -189,13 +197,16 @@ class Store:
 
     async def save_agent(self, agent: Agent) -> None:
         await self.db.execute(
-            "UPDATE agents SET name = ?, persona = ?, provider_id = ?, model_id = ?, revision = ?,"
-            " archived = ?, updated_at = ? WHERE id = ?",
+            "UPDATE agents SET name = ?, persona = ?, provider_id = ?, model_id = ?,"
+            " working_directory = ?, tool_access = ?, revision = ?, archived = ?, updated_at = ?"
+            " WHERE id = ?",
             (
                 agent.name,
                 agent.persona,
                 agent.provider_id,
                 agent.model_id,
+                agent.working_directory,
+                agent.tool_access.value,
                 agent.revision,
                 int(agent.archived),
                 iso(agent.updated_at),
