@@ -7,6 +7,8 @@ inspect ``FakeOpenCode.calls`` afterwards.
 Like real OpenCode, sessions created with ``?directory=D`` belong to the instance of ``D``: their
 events are only delivered to ``GET /event?directory=D`` subscribers (sessions without a
 directory belong to the server's own cwd, i.e. subscribers without the parameter).
+``PATCH /session/{id}`` *appends* permission rules (as OpenCode 1.18.33 does); ``GET /path``
+reports the worktree configured in ``FakeOpenCode.worktrees`` (default ``/``: not in git).
 """
 
 from __future__ import annotations
@@ -282,6 +284,9 @@ class FakeOpenCode:
     messages: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     sessions: list[str] = field(default_factory=list)
     session_dirs: dict[str, str | None] = field(default_factory=dict)  # None = neutral
+    permissions: dict[str, list[dict[str, str]]] = field(default_factory=dict)  # per session
+    worktrees: dict[str, str] = field(default_factory=dict)  # directory -> git worktree
+    patch_status: int = 200
     busy: set[str] = field(default_factory=set)
     url: str = ""
     # (directory, queue) per /event subscriber; directory None = no parameter (neutral)
@@ -364,7 +369,28 @@ class FakeOpenCode:
             return denied
         sid = _id("ses")
         self.add_session(sid, call.directory)
+        self.permissions[sid] = list(body.get("permission") or [])
         return JSONResponse({**self._session_info(sid), "title": body.get("title")})
+
+    async def _patch_session(self, request: Request) -> Response:
+        body = await request.json()
+        if denied := self._unauthorized(self._record(request, body)):
+            return denied
+        sid = request.path_params["sid"]
+        if self.patch_status != 200 or sid not in self.session_dirs:
+            status_code = self.patch_status if self.patch_status != 200 else 404
+            return JSONResponse({"name": "Error", "data": {"message": "nope"}}, status_code)
+        self.permissions.setdefault(sid, []).extend(body.get("permission") or [])
+        return JSONResponse({**self._session_info(sid), "permission": self.permissions[sid]})
+
+    async def _path(self, request: Request) -> Response:
+        call = self._record(request)
+        if denied := self._unauthorized(call):
+            return denied
+        directory = call.directory or NEUTRAL_DIR
+        return JSONResponse(
+            {"directory": directory, "worktree": self.worktrees.get(directory, "/")}
+        )
 
     async def _get_session(self, request: Request) -> Response:
         if denied := self._unauthorized(self._record(request)):
@@ -473,7 +499,9 @@ class FakeOpenCode:
                 Route("/provider", self._providers),
                 Route("/session", self._create_session, methods=["POST"]),
                 Route("/session/status", self._status),
-                Route("/session/{sid}", self._get_session),
+                Route("/session/{sid}", self._get_session, methods=["GET"]),
+                Route("/session/{sid}", self._patch_session, methods=["PATCH"]),
+                Route("/path", self._path),
                 Route("/session/{sid}/message", self._messages),
                 Route("/session/{sid}/message/{mid}", self._message),
                 Route("/session/{sid}/prompt_async", self._prompt, methods=["POST"]),

@@ -3,7 +3,7 @@
 Public surface (do not rename; the application layer and launcher import these):
 
     create_runtime(config: AppConfig) -> OpenCodeRuntime
-    build_opencode_config() -> dict   # inline config for the neutral, tool-disabled agent
+    build_opencode_config() -> dict   # inline config: neutral agent + file-tool agents
 """
 
 from __future__ import annotations

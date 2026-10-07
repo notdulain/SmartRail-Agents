@@ -10,6 +10,12 @@ directory (prompt, abort, message reads, ``/session/status``, the event subscrip
 that directory; the runtime remembers session -> directory. Sessions without a directory use
 OpenCode's own (neutral) cwd and never send the parameter.
 
+Tool access (see ``agent_config``): every session is created deny-all. A turn picks the OpenCode
+agent for its tool access, and for a session with a directory the runtime first makes sure the
+session's permission ruleset matches that access (``PATCH /session/{id}``, only when it
+changed): OpenCode enforces these rules server-side, both when choosing which tools the model
+is offered and when a tool runs. Sessions without a directory never get tools.
+
 How one turn works (see ``stream``):
 
 1. Open ``GET /event`` and wait for its ``server.connected`` frame, so the subscription is
@@ -41,7 +47,7 @@ from urllib.parse import quote
 import httpx
 
 from backend.config import AppConfig
-from backend.contracts.models import ErrorCode, ProvidersResponse, Usage
+from backend.contracts.models import ErrorCode, ProvidersResponse, ToolAccess, Usage
 from backend.contracts.runtime import (
     Completed,
     CompletionRequest,
@@ -51,7 +57,7 @@ from backend.contracts.runtime import (
     TextDelta,
 )
 
-from .agent_config import AGENT_NAME
+from .agent_config import AGENT_NAME, agent_for, session_permission
 from .catalog import map_providers
 from .errors import MAX_MESSAGE_CHARS, classify_error, classify_text, is_missing_model
 from .sse import iter_sse_json
@@ -105,6 +111,23 @@ def _same_directory(a: str, b: str) -> bool:
         return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
     except (OSError, ValueError):
         return False
+
+
+def _confinement(worktree: Any, directory: Any) -> str | None:
+    """Where OpenCode's boundary is wider than ``directory``: its path relative to the worktree.
+
+    OpenCode lets tools touch anything inside the session directory *or* its worktree (the git
+    repository root; ``/`` outside git). ``None`` means the boundary already is ``directory``.
+    Raises ``ValueError`` when the layout cannot be confined safely.
+    """
+    if not isinstance(worktree, str) or not isinstance(directory, str) or not directory:
+        raise ValueError("OpenCode reported no working directory")
+    if worktree in ("", "/") or _same_directory(worktree, directory):
+        return None
+    relative = os.path.relpath(directory, worktree)  # ValueError across Windows drives
+    if relative.startswith("..") or os.path.isabs(relative) or any(c in relative for c in "*?"):
+        raise ValueError(f"unexpected OpenCode worktree for {directory!r}")
+    return relative.replace(os.sep, "/")
 
 
 class _EventConnection:
@@ -210,6 +233,7 @@ class HttpOpenCodeRuntime:
         self._catalog_lock = asyncio.Lock()
         self._active: set[str] = set()
         self._directories: dict[str, str | None] = {}  # session id -> working directory
+        self._policies: dict[str, list[dict[str, str]]] = {}  # session id -> applied ruleset
         self._tasks: set[asyncio.Future[Any]] = set()
         self._closed = False
 
@@ -250,7 +274,7 @@ class HttpOpenCodeRuntime:
         body = {
             "title": title.strip() or "SmartRail chat",  # a non-default title skips title-gen
             "agent": AGENT_NAME,
-            "permission": [{"permission": "*", "pattern": "*", "action": "deny"}],
+            "permission": session_permission(ToolAccess.NONE),  # opened per turn, if allowed
         }
         try:
             response = await self._client.post("/session", params=_where(directory), json=body)
@@ -267,6 +291,8 @@ class HttpOpenCodeRuntime:
         if not isinstance(session_id, str):
             raise RuntimeUnavailableError("OpenCode returned an invalid session id")
         self._directories[session_id] = directory
+        if directory is not None:
+            self._policies[session_id] = body["permission"]
         return session_id
 
     async def abort(self, session_id: str) -> None:
@@ -310,6 +336,13 @@ class HttpOpenCodeRuntime:
                 settled = True
                 yield failure
                 return
+            access = request.tool_access if directory is not None else ToolAccess.NONE
+            if directory is not None:
+                failure = await self._apply_tool_access(session_id, directory, access)
+                if failure is not None:
+                    settled = True
+                    yield failure
+                    return
             events = _EventConnection(self._client, directory)
             try:
                 await events.open()
@@ -318,7 +351,7 @@ class HttpOpenCodeRuntime:
                 yield Failed(ErrorCode.PROVIDER_UNAVAILABLE, _unreachable_message(exc))
                 return
 
-            failure, delivered = await self._send_prompt(request, directory)
+            failure, delivered = await self._send_prompt(request, directory, access)
             if failure is not None:
                 settled = not delivered
                 yield failure
@@ -431,12 +464,45 @@ class HttpOpenCodeRuntime:
         # Unknown to OpenCode (or unreachable): route as requested and let the prompt report it.
         return actual if isinstance(actual, str) and actual else requested
 
+    async def _apply_tool_access(
+        self, session_id: str, directory: str, access: ToolAccess
+    ) -> Failed | None:
+        """Make the session's permission ruleset match ``access`` before the prompt runs."""
+        where = _where(directory)
+        try:
+            confine_to = None
+            if access is not ToolAccess.NONE:
+                response = await self._client.get("/path", params=where)
+                info = response.json() if response.status_code == 200 else {}
+                if not isinstance(info, dict):
+                    raise ValueError("invalid /path response")
+                confine_to = _confinement(info.get("worktree"), info.get("directory"))
+        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+            log.warning("cannot confine tools for %s: %s", session_id, exc)
+            return Failed(
+                ErrorCode.RUNTIME_ERROR,
+                "Could not confine file tools to the agent's working directory",
+            )
+        rules = session_permission(access, confine_to)
+        if self._policies.get(session_id) == rules:
+            return None
+        try:
+            response = await self._client.patch(
+                f"/session/{quote(session_id, safe='')}", params=where, json={"permission": rules}
+            )
+        except (httpx.HTTPError, RuntimeError) as exc:
+            return Failed(ErrorCode.PROVIDER_UNAVAILABLE, _unreachable_message(exc))
+        if response.status_code != 200:
+            return _http_failure(response, "permission update")
+        self._policies[session_id] = rules
+        return None
+
     async def _send_prompt(
-        self, request: CompletionRequest, directory: str | None
+        self, request: CompletionRequest, directory: str | None, access: ToolAccess
     ) -> tuple[Failed | None, bool]:
         """POST the prompt once. Returns ``(failure, maybe_delivered)``; never retried."""
         body: dict[str, Any] = {
-            "agent": AGENT_NAME,
+            "agent": agent_for(access),
             "model": {"providerID": request.provider_id, "modelID": request.model_id},
             "parts": [{"type": "text", "text": request.user_text}],
         }
