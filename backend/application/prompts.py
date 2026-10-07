@@ -116,9 +116,9 @@ def format_transcript(
     for msg in messages:
         if msg.status in (MessageStatus.STREAMING, MessageStatus.FAILED) and not msg.content:
             continue
-        if not msg.content.strip():
+        if not msg.content.strip() and not msg.images:
             continue
-        block = f"[{speaker_label(msg)}]: {msg.content.strip()}"
+        block = f"[{speaker_label(msg)}]: {msg.content.strip() or '[Image attached]'}"
         blocks.append((msg.id, with_attachments(block, attachments.get(msg.id))))
     kept: list[str] = []
     total = 0

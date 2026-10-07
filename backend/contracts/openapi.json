@@ -638,6 +638,30 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "ImageAttachment": {
+        "additionalProperties": false,
+        "description": "An image pasted into the composer, encoded as a data URL.",
+        "properties": {
+          "data_url": {
+            "maxLength": 14000000,
+            "minLength": 1,
+            "title": "Data Url",
+            "type": "string"
+          },
+          "filename": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Filename",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename",
+          "data_url"
+        ],
+        "title": "ImageAttachment",
+        "type": "object"
+      },
       "Message": {
         "additionalProperties": false,
         "properties": {
@@ -698,6 +722,13 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "images": {
+            "items": {
+              "$ref": "#/components/schemas/ImageAttachment"
+            },
+            "title": "Images",
+            "type": "array"
           },
           "model_id": {
             "anyOf": [
@@ -1377,9 +1408,16 @@
           },
           "content": {
             "maxLength": 20000,
-            "minLength": 1,
             "title": "Content",
             "type": "string"
+          },
+          "images": {
+            "items": {
+              "$ref": "#/components/schemas/ImageAttachment"
+            },
+            "maxItems": 4,
+            "title": "Images",
+            "type": "array"
           }
         },
         "required": [

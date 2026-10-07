@@ -103,6 +103,11 @@ class DiscussionDriver:
             prompts.group_framing(speaker.name, names, topic, coordinator=coordinating),
             prompts.tools_text(speaker),
         )
+        current_images = (
+            tuple(active.user_message.images)
+            if active.user_message and any(m.id == active.user_message.id for m in messages)
+            else ()
+        )
         outcome = await self.manager.run_turn(
             active,
             speaker=speaker,
@@ -110,6 +115,7 @@ class DiscussionDriver:
             reply_to_id=reply_to_id,
             system=system,
             user_text=prompts.turn_text(task, topic, transcript),
+            images=current_images,
             max_tokens=(
                 active.coordinator_max_tokens if coordinating else active.participant_max_tokens
             ),

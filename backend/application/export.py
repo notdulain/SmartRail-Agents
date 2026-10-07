@@ -82,6 +82,8 @@ def render_markdown(
             lines += [msg.content.rstrip(), ""]
         if msg.attachments:
             lines += [_attachments_line(msg, conv, agent_names), ""]
+        if msg.images:
+            lines += ["_Images:_ " + ", ".join(_code(image.filename) for image in msg.images), ""]
         if msg.tool_calls:
             lines += [_tool_calls_line(msg), ""]
         if msg.status is MessageStatus.CANCELLED:

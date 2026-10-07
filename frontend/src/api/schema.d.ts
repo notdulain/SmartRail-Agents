@@ -506,6 +506,16 @@ export interface components {
             /** Version */
             version: string;
         };
+        /**
+         * ImageAttachment
+         * @description An image pasted into the composer, encoded as a data URL.
+         */
+        ImageAttachment: {
+            /** Data Url */
+            data_url: string;
+            /** Filename */
+            filename: string;
+        };
         /** Message */
         Message: {
             /** @default null */
@@ -530,6 +540,8 @@ export interface components {
             error_code: components["schemas"]["ErrorCode"] | null;
             /** Id */
             id: string;
+            /** Images */
+            images?: components["schemas"]["ImageAttachment"][];
             /**
              * Model Id
              * @default null
@@ -782,6 +794,8 @@ export interface components {
             attachments?: components["schemas"]["FileRef"][];
             /** Content */
             content: string;
+            /** Images */
+            images?: components["schemas"]["ImageAttachment"][];
         };
         /** SendMessageResponse */
         SendMessageResponse: {

@@ -19,6 +19,7 @@ from backend.contracts.models import (
     ConversationType,
     ErrorCode,
     FileRef,
+    ImageAttachment,
     Message,
     MessageRole,
     MessageStatus,
@@ -81,13 +82,16 @@ def _message(row: aiosqlite.Row) -> Message:
         attachments=[
             FileRef.model_validate(a) for a in json.loads(row["attachments_json"] or "[]")
         ],
+        images=[ImageAttachment.model_validate(i) for i in json.loads(row["images_json"] or "[]")],
         tool_calls=[ToolCall.model_validate(c) for c in json.loads(row["tool_calls_json"] or "[]")],
         stage=row["stage"],
         created_at=parse_dt(row["created_at"]),
     )
 
 
-def _json_list(items: Sequence[FileRef] | Sequence[ToolCall]) -> str | None:
+def _json_list(
+    items: Sequence[FileRef] | Sequence[ImageAttachment] | Sequence[ToolCall],
+) -> str | None:
     return json.dumps([i.model_dump(mode="json") for i in items]) if items else None
 
 
@@ -304,8 +308,8 @@ class Store:
         return (
             "INSERT INTO messages (id, conversation_id, run_id, role, speaker_name, agent_json,"
             " provider_id, model_id, content, status, error, error_code, reply_to_id, stage,"
-            " attachments_json, attachments_text, tool_calls_json, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " attachments_json, attachments_text, tool_calls_json, images_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 msg.id,
                 msg.conversation_id,
@@ -324,6 +328,7 @@ class Store:
                 _json_list(msg.attachments),
                 attachments_text,
                 _json_list(msg.tool_calls),
+                _json_list(msg.images),
                 iso(msg.created_at),
             ),
         )

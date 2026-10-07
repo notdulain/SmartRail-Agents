@@ -46,10 +46,15 @@ describe("api client file routes", () => {
     const api = createApiClient();
     await api.sendMessage("cnv_1", "hi");
     await api.sendMessage("cnv_1", "see", [{ agent_id: "agt_1", path: "a/b.md" }]);
+    await api.sendMessage("cnv_1", "", [], [{ filename: "shot.png", data_url: "data:image/png;base64,AAAA" }]);
     expect(m.calls[0].body).toEqual({ content: "hi" });
     expect(m.calls[1].body).toEqual({
       content: "see",
       attachments: [{ agent_id: "agt_1", path: "a/b.md" }],
+    });
+    expect(m.calls[2].body).toEqual({
+      content: "",
+      images: [{ filename: "shot.png", data_url: "data:image/png;base64,AAAA" }],
     });
   });
 });

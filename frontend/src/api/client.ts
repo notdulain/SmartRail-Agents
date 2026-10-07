@@ -9,6 +9,7 @@ import type {
   ErrorCode,
   FileRef,
   FileSearchResponse,
+  ImageAttachment,
   ProvidersResponse,
   Run,
   SendMessageResponse,
@@ -76,6 +77,7 @@ export interface ApiClient {
     conversationId: string,
     content: string,
     attachments?: FileRef[],
+    images?: ImageAttachment[],
   ): Promise<SendMessageResponse>;
   stopRun(runId: string): Promise<Run>;
   getSettings(): Promise<Settings>;
@@ -124,10 +126,10 @@ export function createApiClient(fetchImpl: FetchLike = (...a) => fetch(...a)): A
     listConversations: () => request("/conversations"),
     createConversation: (b) => request("/conversations", json("POST", b)),
     getConversation: (id) => request(`/conversations/${encodeURIComponent(id)}`),
-    sendMessage: (id, content, attachments = []) =>
+    sendMessage: (id, content, attachments = [], images = []) =>
       request(
         `/conversations/${encodeURIComponent(id)}/messages`,
-        json("POST", attachments.length > 0 ? { content, attachments } : { content }),
+        json("POST", { content, ...(attachments.length ? { attachments } : {}), ...(images.length ? { images } : {}) }),
       ),
     stopRun: (id) => request(`/runs/${encodeURIComponent(id)}/stop`, { method: "POST" }),
     getSettings: () => request("/settings"),

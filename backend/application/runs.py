@@ -21,6 +21,7 @@ from backend.contracts.models import (
     ConversationType,
     ErrorCode,
     FileRef,
+    ImageAttachment,
     Message,
     MessageCompletedEvent,
     MessageDeltaEvent,
@@ -190,6 +191,7 @@ class RunManager:
         coordinator_max_tokens: int,
         attachments: Sequence[FileRef] = (),
         attachments_text: str | None = None,
+        images: Sequence[ImageAttachment] = (),
     ) -> tuple[Run, Message]:
         async with self._lock:
             if self.active is not None:
@@ -212,6 +214,7 @@ class RunManager:
                 content=content,
                 status=MessageStatus.COMPLETE,
                 attachments=list(attachments),
+                images=list(images),
                 created_at=now,
             )
             await self.store.db.tx(
@@ -269,6 +272,8 @@ class RunManager:
         assert active.user_message is not None and active.conversation is not None
         speaker = active.run.participants[0]
         user_text = prompts.with_attachments(active.user_message.content, active.attachments_text)
+        if not user_text.strip() and active.user_message.images:
+            user_text = "[Image attached]"
         conv_id = active.conversation.id
         session = await self.store.usable_session(
             conv_id, speaker.agent_id, speaker.working_directory
@@ -289,6 +294,7 @@ class RunManager:
                 speaker.persona, active.brief, tools=prompts.tools_text(speaker)
             ),
             user_text=user_text,
+            images=tuple(active.user_message.images),
             max_tokens=active.participant_max_tokens,
         )
 
@@ -489,6 +495,7 @@ class RunManager:
         system: str,
         user_text: str,
         max_tokens: int,
+        images: tuple[ImageAttachment, ...] = (),
     ) -> TurnOutcome:
         """One agent turn: budget gate, message row, runtime stream, final state."""
         assert active.conversation is not None
@@ -548,6 +555,7 @@ class RunManager:
                     model_id=speaker.model_id,
                     system=system,
                     user_text=user_text,
+                    images=images,
                     max_output_tokens=max_tokens,
                     directory=speaker.working_directory,
                     tool_access=speaker.tool_access,

@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
-from .models import ErrorCode, ProvidersResponse, ToolAccess, ToolCall, Usage
+from .models import ErrorCode, ImageAttachment, ProvidersResponse, ToolAccess, ToolCall, Usage
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,7 @@ class CompletionRequest:
     max_output_tokens: int
     directory: str | None = None
     tool_access: ToolAccess = ToolAccess.NONE
+    images: tuple[ImageAttachment, ...] = ()
 
 
 @dataclass(frozen=True)

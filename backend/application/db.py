@@ -14,7 +14,7 @@ from typing import Any
 
 import aiosqlite
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA_V1 = """
 CREATE TABLE agents (
@@ -133,8 +133,12 @@ ALTER TABLE messages ADD COLUMN tool_calls_json TEXT;
 ALTER TABLE session_map ADD COLUMN directory TEXT;
 """
 
+_SCHEMA_V3 = """
+ALTER TABLE messages ADD COLUMN images_json TEXT;
+"""
+
 # version -> script upgrading from (version - 1). Append new entries; never edit old ones.
-_MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2}
+_MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3}
 
 Statement = tuple[str, Sequence[Any]]
 

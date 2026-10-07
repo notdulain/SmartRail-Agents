@@ -162,14 +162,16 @@ async def test_v1_database_upgrades_with_data_intact(tmp_path):
         assert agent["working_directory"] is None and agent["tool_access"] == "none"
         (msg,) = await env.messages("cnv_old")
         assert msg["content"] == "old text"
-        assert msg["attachments"] == [] and msg["tool_calls"] == []
+        assert msg["attachments"] == [] and msg["images"] == [] and msg["tool_calls"] == []
         # The pre-v2 session (no directory) is still reused for an agent without a directory.
         await env.run_to_end("cnv_old", "again")
         assert runtime.requests[0].session_id == "ses_old"
     con = sqlite3.connect(db_path)
     try:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
         cols = {r[1] for r in con.execute("PRAGMA table_info(session_map)")}
         assert "directory" in cols
+        message_cols = {r[1] for r in con.execute("PRAGMA table_info(messages)")}
+        assert "images_json" in message_cols
     finally:
         con.close()

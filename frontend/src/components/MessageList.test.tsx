@@ -179,6 +179,14 @@ describe("MessageList attachments and tool calls", () => {
     expect(within(list).queryByRole("button")).not.toBeInTheDocument();
   });
 
+  it("shows pasted images on user messages", () => {
+    render(<MessageList messages={[makeUserMessage({
+      content: "",
+      images: [{ filename: "shot.png", data_url: "data:image/png;base64,aGVsbG8=" }],
+    })]} />);
+    expect(screen.getByRole("img", { name: "shot.png" })).toHaveAttribute("src", "data:image/png;base64,aGVsbG8=");
+  });
+
   it("labels attachments with the agent name in group chats", () => {
     render(
       <MessageList

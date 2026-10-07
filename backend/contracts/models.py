@@ -134,6 +134,13 @@ class FileRef(ApiModel):
     path: str = Field(min_length=1, max_length=PATH_MAX)
 
 
+class ImageAttachment(ApiModel):
+    """An image pasted into the composer, encoded as a data URL."""
+
+    filename: str = Field(min_length=1, max_length=100)
+    data_url: str = Field(min_length=1, max_length=14_000_000)
+
+
 class FileEntry(ApiModel):
     path: str  # relative to the working directory, ``/`` separators
     is_dir: bool = False
@@ -278,6 +285,7 @@ class Message(ApiModel):
     reply_to_id: str | None = None
     # User messages: files attached with ``@`` (their contents were sent with the message).
     attachments: list[FileRef] = Field(default_factory=list)
+    images: list[ImageAttachment] = Field(default_factory=list)
     # Agent messages: file-tool calls made while producing the message, in call order.
     tool_calls: list[ToolCall] = Field(default_factory=list)
     # Group discussions: 0 = coordinator agenda, 1 = first round, 2 = peer-response round,
@@ -324,12 +332,14 @@ class Run(ApiModel):
 
 
 MAX_ATTACHMENTS = 20
+MAX_IMAGES = 4
 
 
 class SendMessageRequest(ApiModel):
-    content: str = Field(min_length=1, max_length=20000)
+    content: str = Field(max_length=20000)
     # Each ``agent_id`` must be a participant of the conversation with a working directory.
     attachments: list[FileRef] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)
+    images: list[ImageAttachment] = Field(default_factory=list, max_length=MAX_IMAGES)
 
 
 class SendMessageResponse(ApiModel):

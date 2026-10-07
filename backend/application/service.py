@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import re
 
 from backend.config import AppConfig
 from backend.contracts.models import (
@@ -18,6 +21,7 @@ from backend.contracts.models import (
     ErrorCode,
     FileRef,
     FileSearchResponse,
+    ImageAttachment,
     ProvidersResponse,
     Run,
     SendMessageRequest,
@@ -48,6 +52,36 @@ from .util import new_id, utcnow
 _NEEDS_DIRECTORY = (
     "File tools need a working directory. Choose a working directory or set tool access to none."
 )
+
+_IMAGE_URL = re.compile(r"^data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]*={0,2})$")
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+_MAX_IMAGES_TOTAL_BYTES = 10 * 1024 * 1024
+
+
+def _validate_images(images: list[ImageAttachment]) -> None:
+    total = 0
+    for image in images:
+        match = _IMAGE_URL.fullmatch(image.data_url)
+        if match is None:
+            raise invalid("Pasted image must be a PNG, JPEG, GIF, or WebP data URL.")
+        try:
+            data = base64.b64decode(match.group(2), validate=True)
+        except binascii.Error:
+            raise invalid("Pasted image data is invalid.") from None
+        mime = match.group(1)
+        signatures = {
+            "image/png": data.startswith(b"\x89PNG\r\n\x1a\n"),
+            "image/jpeg": data.startswith(b"\xff\xd8\xff"),
+            "image/gif": data.startswith((b"GIF87a", b"GIF89a")),
+            "image/webp": data.startswith(b"RIFF") and data[8:12] == b"WEBP",
+        }
+        if not signatures[mime]:
+            raise invalid("Pasted image content does not match its format.")
+        if len(data) > _MAX_IMAGE_BYTES:
+            raise invalid("Each pasted image must be 5 MB or smaller.")
+        total += len(data)
+        if total > _MAX_IMAGES_TOTAL_BYTES:
+            raise invalid("Pasted images may not exceed 10 MB in total.")
 
 
 class Service:
@@ -272,8 +306,9 @@ class Service:
         if self.runs.active is not None:
             raise self.runs.run_active_error()
         content = body.content
-        if not content.strip():
-            raise invalid("content must not be blank")
+        if not content.strip() and not body.images:
+            raise invalid("content must not be blank unless an image is attached")
+        _validate_images(body.images)
 
         agents = await self.store.get_agents(conv.participant_ids)
         snapshots = []
@@ -306,6 +341,7 @@ class Service:
             coordinator_max_tokens=settings.coordinator_max_tokens,
             attachments=refs,
             attachments_text=attachments_text,
+            images=body.images,
         )
         return SendMessageResponse(run_id=run.id, user_message_id=user_message.id)
 

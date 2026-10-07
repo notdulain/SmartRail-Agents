@@ -64,6 +64,7 @@ export function makeMessage(over: Partial<Message> = {}): Message {
     error_code: null,
     reply_to_id: null,
     attachments: [],
+    images: [],
     tool_calls: [],
     stage: null,
     created_at: NOW,

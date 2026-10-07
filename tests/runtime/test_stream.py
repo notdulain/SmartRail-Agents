@@ -5,7 +5,7 @@ import base64
 
 import pytest
 
-from backend.contracts.models import ErrorCode
+from backend.contracts.models import ErrorCode, ImageAttachment
 from backend.contracts.runtime import Completed, Failed, TextDelta
 from backend.runtime.opencode import HttpOpenCodeRuntime
 
@@ -72,6 +72,17 @@ async def test_empty_system_is_omitted(fake: FakeOpenCode, runtime):
     session = await runtime.create_session("chat")
     await collect(runtime, request(session, system=""))
     assert "system" not in fake.prompts[0].body
+
+
+async def test_pasted_image_is_sent_as_file_part(fake: FakeOpenCode, runtime):
+    session = await runtime.create_session("chat")
+    image = ImageAttachment(filename="shot.png", data_url="data:image/png;base64,aGVsbG8=")
+    req = request(session, text="What is this?")
+    await collect(runtime, req.__class__(**{**req.__dict__, "images": (image,)}))
+    assert fake.prompts[0].body["parts"] == [
+        {"type": "text", "text": "What is this?"},
+        {"type": "file", "mime": "image/png", "filename": "shot.png", "url": image.data_url},
+    ]
 
 
 async def test_subscription_is_live_before_the_prompt_is_sent(fake: FakeOpenCode, runtime):

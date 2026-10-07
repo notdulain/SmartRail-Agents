@@ -114,12 +114,24 @@ function UserMessage({
   agentName?(agentId: string): string | undefined;
 }) {
   const attachments: FileRef[] = message.attachments ?? [];
+  const images = message.images ?? [];
   return (
     <article className="flex flex-col items-end gap-1" aria-label={`${message.speaker_name} message`}>
       <div className="text-xs font-medium text-muted">{message.speaker_name}</div>
-      <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-tr-md bg-accent-soft px-4 py-2.5 text-[0.95rem]">
-        {message.content}
-      </div>
+      {message.content ? (
+        <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-tr-md bg-accent-soft px-4 py-2.5 text-[0.95rem]">
+          {message.content}
+        </div>
+      ) : null}
+      {images.length > 0 ? (
+        <ul aria-label="Attached images" className="flex max-w-[85%] flex-wrap justify-end gap-2">
+          {images.map((image, index) => (
+            <li key={index}>
+              <img src={image.data_url} alt={image.filename} className="max-h-64 max-w-full rounded-xl object-contain" />
+            </li>
+          ))}
+        </ul>
+      ) : null}
       {attachments.length > 0 ? (
         <ul aria-label="Attached files" className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
           {attachments.map((a) => (

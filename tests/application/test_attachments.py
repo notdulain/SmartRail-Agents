@@ -1,5 +1,6 @@
 """@-attachments: files from a participant's working directory sent with a user message."""
 
+import base64
 import os
 import sys
 from pathlib import Path
@@ -70,6 +71,55 @@ async def test_direct_attachment_is_sent_stored_and_kept_as_sent(env, project):
         {"agent_id": ada["id"], "path": "src/app.py"},
         {"agent_id": ada["id"], "path": "notes.md"},
     ]
+
+
+async def test_pasted_image_reaches_runtime_and_survives_reload(env):
+    agent = await env.agent()
+    conv = await env.direct(agent["id"])
+    url = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\nimage").decode()
+    image = {"filename": "screenshot.png", "data_url": url}
+    response = await env.client.post(
+        f"/api/conversations/{conv}/messages", json={"content": "", "images": [image]}
+    )
+    assert response.status_code == 202, response.text
+    await env.wait(response.json()["run_id"])
+    assert env.runtime.requests[0].images[0].data_url == url
+    user = (await env.messages(conv))[0]
+    assert user["images"] == [image]
+    assert user["content"] == ""
+
+
+async def test_rejects_invalid_pasted_image(env):
+    agent = await env.agent()
+    conv = await env.direct(agent["id"])
+    response = await env.client.post(
+        f"/api/conversations/{conv}/messages",
+        json={
+            "content": "inspect",
+            "images": [{"filename": "bad.png", "data_url": "data:image/png;base64,YWJj"}],
+        },
+    )
+    assert response.status_code == 422
+    assert not env.runtime.requests
+
+
+async def test_pasted_image_reaches_each_group_participant(env):
+    ada = await env.agent("Ada")
+    bob = await env.agent("Bob")
+    coord = await _agent(env, "Coord", model=MINI)
+    await env.set_coordinator(coord["id"])
+    conv = await env.group([ada["id"], bob["id"]])
+    url = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\nimage").decode()
+    response = await env.client.post(
+        f"/api/conversations/{conv}/messages",
+        json={"content": "Inspect this", "images": [{"filename": "shot.png", "data_url": url}]},
+    )
+    assert response.status_code == 202, response.text
+    await env.wait(response.json()["run_id"])
+    assert all(
+        request.images and request.images[0].data_url == url
+        for request in env.runtime.requests[:3]
+    )
 
 
 async def test_group_attachment_reaches_every_speaker(env, project, tmp_path):

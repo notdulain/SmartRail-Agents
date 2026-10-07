@@ -41,7 +41,8 @@ opencode auth login        # choose OpenAI → ChatGPT sign-in for the GPT-6-sol
    working directory, and never get shell, web or MCP tools.
 3. **New discussion**: a direct chat with one agent, or a group (2+ agents plus a topic).
    Each send runs one bounded exchange; **Stop** cancels it. Type `@` in the composer to attach
-   files from a participant's working directory; their text is sent with your message. Tool
+   files from a participant's working directory; their text is sent with your message. Paste a
+   PNG, JPEG, GIF, or WebP image into the composer to send it with your message. Tool
    calls an agent makes (files read, edited, searched) are listed above its reply.
 4. Conversation menu → **Export transcript** writes Markdown only when you ask.
 

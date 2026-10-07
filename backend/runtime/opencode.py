@@ -515,7 +515,18 @@ class HttpOpenCodeRuntime:
         body: dict[str, Any] = {
             "agent": agent_for(access),
             "model": {"providerID": request.provider_id, "modelID": request.model_id},
-            "parts": [{"type": "text", "text": request.user_text}],
+            "parts": [
+                {"type": "text", "text": request.user_text},
+                *(
+                    {
+                        "type": "file",
+                        "mime": image.data_url.split(";", 1)[0][5:],
+                        "filename": image.filename,
+                        "url": image.data_url,
+                    }
+                    for image in request.images
+                ),
+            ],
         }
         if request.system:
             body["system"] = request.system

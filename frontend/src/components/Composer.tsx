@@ -5,9 +5,10 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type ClipboardEvent,
 } from "react";
 import { api } from "../api/client";
-import { MAX_ATTACHMENTS, type FileEntry, type FileRef } from "../api/types";
+import { MAX_ATTACHMENTS, MAX_IMAGES, type FileEntry, type FileRef, type ImageAttachment } from "../api/types";
 import { AttachmentChip } from "./AttachmentChip";
 import { Button } from "./ui/Button";
 import { FileIcon, FolderIcon, SendIcon, SpinnerIcon, StopIcon } from "./ui/icons";
@@ -33,7 +34,7 @@ interface Props {
   mentionSources?: MentionSource[];
   /** Label files with their agent's name (group chats). Defaults to "more than one source". */
   labelSources?: boolean;
-  onSend(text: string, attachments: FileRef[]): Promise<boolean>;
+  onSend(text: string, attachments: FileRef[], images?: ImageAttachment[]): Promise<boolean>;
   onStop(): void;
 }
 
@@ -89,6 +90,8 @@ export function Composer({
   const [text, setText] = useState("");
   const [caret, setCaret] = useState(0);
   const [attachments, setAttachments] = useState<FileRef[]>([]);
+  const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [readingImages, setReadingImages] = useState(false);
   const [anchor, setAnchor] = useState<Anchor | null>(null);
   /** `@` position the user closed with Escape; stays closed until a new mention starts. */
   const [dismissed, setDismissed] = useState<number | null>(null);
@@ -177,15 +180,16 @@ export function Composer({
 
   const trimmed = text.trim();
   const tooLong = text.length > MESSAGE_MAX;
-  const canSend = !disabled && trimmed.length > 0 && !tooLong;
+  const canSend = !disabled && !readingImages && (trimmed.length > 0 || images.length > 0) && !tooLong;
 
   async function submit() {
     if (!canSend) return;
-    const ok = await onSend(text, attachments);
+    const ok = await onSend(text, attachments, images);
     if (ok) {
       setText("");
       setCaret(0);
-      setAttachments([]);
+        setAttachments([]);
+        setImages([]);
       setAnchor(null);
       setDismissed(null);
       setNotice(null);
@@ -263,6 +267,60 @@ export function Composer({
   function syncCaret() {
     const el = ref.current;
     if (el) setCaret(el.selectionStart ?? el.value.length);
+  }
+
+  async function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(e.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (files.length === 0 || disabled) return;
+    e.preventDefault();
+    if (readingImages) {
+      setNotice("Wait for the current image to finish loading.");
+      return;
+    }
+    const pastedText = e.clipboardData.getData("text/plain");
+    if (pastedText) {
+      const el = e.currentTarget;
+      const next = text.slice(0, el.selectionStart) + pastedText + text.slice(el.selectionEnd);
+      const pos = el.selectionStart + pastedText.length;
+      pendingCaret.current = pos;
+      setText(next);
+      setCaret(pos);
+    }
+    if (images.length + files.length > MAX_IMAGES) {
+      setNotice(`You can paste up to ${MAX_IMAGES} images in one message.`);
+      return;
+    }
+    const total = images.reduce((sum, image) => sum + Math.floor(image.data_url.length * 3 / 4), 0)
+      + files.reduce((sum, file) => sum + file.size, 0);
+    if (files.some((file) => file.size > 5 * 1024 * 1024) || total > 10 * 1024 * 1024) {
+      setNotice("Each image must be 5 MB or smaller, and images may total up to 10 MB.");
+      return;
+    }
+    if (files.some((file) => !["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type))) {
+      setNotice("Paste a PNG, JPEG, GIF, or WebP image.");
+      return;
+    }
+    setReadingImages(true);
+    try {
+      const added = await Promise.all(files.map((file, index) => new Promise<ImageAttachment>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({
+          filename: (file.name || `pasted-image-${images.length + index + 1}.${file.type.split("/")[1]}`).slice(0, 100),
+          data_url: String(reader.result),
+        });
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      })));
+      setImages((current) => [...current, ...added]);
+      setNotice(null);
+    } catch {
+      setNotice("Could not read the pasted image. Try copying it again.");
+    } finally {
+      setReadingImages(false);
+    }
   }
 
   const stale = searching || results?.query !== query;
@@ -380,7 +438,7 @@ export function Composer({
             void submit();
           }}
         >
-          {attachments.length > 0 ? (
+            {attachments.length > 0 ? (
             <ul aria-label="Attachments" className="flex flex-wrap gap-1.5 px-1 pt-0.5">
               {attachments.map((a) => (
                 <li key={`${a.agent_id}:${a.path}`} className="min-w-0 max-w-full">
@@ -398,7 +456,17 @@ export function Composer({
                 </li>
               ))}
             </ul>
-          ) : null}
+            ) : null}
+            {images.length > 0 ? (
+              <ul aria-label="Pasted images" className="flex flex-wrap gap-2 px-1 pt-0.5">
+                {images.map((image, index) => (
+                  <li key={index} className="relative">
+                    <img src={image.data_url} alt={image.filename} className="h-20 w-20 rounded-lg border border-line object-cover" />
+                    <button type="button" aria-label={`Remove image ${index + 1}`} onClick={() => setImages(images.filter((_, i) => i !== index))} className="absolute -right-1 -top-1 rounded-full bg-surface px-1.5 text-sm shadow" >×</button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           <div className="flex items-end gap-2">
             <label htmlFor="composer-input" className="sr-only">
               Message
@@ -419,7 +487,8 @@ export function Composer({
                 if (findMention(value, pos, anchor)?.start !== dismissed) setDismissed(null);
               }}
               onSelect={syncCaret}
-              onKeyDown={onKeyDown}
+                onKeyDown={onKeyDown}
+                onPaste={(e) => { void onPaste(e); }}
               onBlur={() => {
                 if (open) {
                   blurred.current = true;
@@ -463,7 +532,7 @@ export function Composer({
           <span className="font-medium text-warn">{notice}</span>
         ) : (
           <>
-            Enter to send, Shift+Enter for a new line.
+              Enter to send, Shift+Enter for a new line. Paste an image to attach it.
             {mentionSources.length > 0 ? " Type @ to attach a file." : null}
           </>
         )}

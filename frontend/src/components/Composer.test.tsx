@@ -1,7 +1,7 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { FileRef } from "../api/types";
+import type { FileRef, ImageAttachment } from "../api/types";
 import { fakeFileSearch } from "../test/fakeFiles";
 import { errorResponse, mockFetch, type Handler } from "../test/mockFetch";
 import { Composer, findMention, type MentionSource } from "./Composer";
@@ -11,7 +11,7 @@ const ONE: MentionSource[] = [{ agentId: "agt_1", agentName: "Driver" }];
 function setup(
   sources: MentionSource[] = ONE,
   routes: Record<string, Handler> = { "GET /api/agents/agt_1/files": fakeFileSearch() },
-  onSend = vi.fn(async (_text: string, _files: FileRef[]) => true),
+  onSend = vi.fn(async (_text: string, _files: FileRef[], _images?: ImageAttachment[]) => true),
 ) {
   const api = mockFetch(routes);
   render(
@@ -110,7 +110,7 @@ describe("Composer @ mentions", () => {
     await userEvent.type(input(), "d");
     expect(popover()).not.toBeInTheDocument();
     await userEvent.keyboard("{Enter}");
-    expect(onSend).toHaveBeenCalledWith("hi @read", []);
+    expect(onSend).toHaveBeenCalledWith("hi @read", [], []);
   });
 
   it("never sends on Enter while the popover is open", async () => {
@@ -157,7 +157,7 @@ describe("Composer @ mentions", () => {
     await waitFor(() => expect(within(popover()!).getAllByRole("option")).toHaveLength(1));
     await userEvent.keyboard("{Enter}");
     await userEvent.type(input(), "summarise this{Enter}");
-    expect(onSend).toHaveBeenCalledWith("summarise this", [{ agent_id: "agt_1", path: "README.md" }]);
+    expect(onSend).toHaveBeenCalledWith("summarise this", [{ agent_id: "agt_1", path: "README.md" }], []);
     await waitFor(() => expect(chips()).not.toBeInTheDocument());
     expect(input()).toHaveValue("");
   });
@@ -172,6 +172,25 @@ describe("Composer @ mentions", () => {
     await waitFor(() => expect(onSend).toHaveBeenCalled());
     expect(within(chips()!).getByText("README.md")).toBeInTheDocument();
     expect(input()).toHaveValue("go");
+  });
+
+  it("pastes an image, previews it, and sends it without text", async () => {
+    const { onSend } = setup();
+    const file = new File(["image"], "shot.png", { type: "image/png" });
+    fireEvent.paste(input(), {
+      clipboardData: {
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        getData: () => "",
+      },
+    });
+    await waitFor(() => expect(screen.getByRole("img", { name: "shot.png" })).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
+    const [text, files, images] = onSend.mock.calls[0];
+    expect(text).toBe("");
+    expect(files).toEqual([]);
+    expect(images).toEqual([{ filename: "shot.png", data_url: expect.stringMatching(/^data:image\/png;base64,/) }]);
+    await waitFor(() => expect(screen.queryByRole("img", { name: "shot.png" })).not.toBeInTheDocument());
   });
 
   it("groups results by agent in group chats", async () => {
@@ -215,7 +234,7 @@ describe("Composer @ mentions", () => {
     await userEvent.keyboard("{Enter}");
     expect(popover()).not.toBeInTheDocument();
     expect(fileCalls(api)).toHaveLength(0);
-    expect(onSend).toHaveBeenCalledWith("@team hello", []);
+    expect(onSend).toHaveBeenCalledWith("@team hello", [], []);
     expect(screen.queryByText(/Type @ to attach/)).not.toBeInTheDocument();
   });
 
