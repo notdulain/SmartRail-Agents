@@ -14,7 +14,14 @@ Build a simple browser app for creating AI agents, chatting with them individual
 - Chats persist locally. Markdown transcripts are generated only through an explicit export request.
 - Development uses incremental commits and parallel feature agents in separate Git worktrees.
 
-Keep the product focused on chat. No deployment, project-file access, coding tools, dashboards, or document-management features.
+Keep the product focused on chat. No deployment, dashboards, or document-management features.
+
+**Amendment (file tools).** Each agent may have a *working directory* and a *tool access* level:
+`none` (default, text only), `read_only` (read/list/glob/grep) or `read_write` (also create and
+edit files). Tools are confined to the agent's working directory; shell, web, MCP and delegation
+tools stay denied at every level. Users attach files from a participant's working directory to a
+message with `@`; their text is sent with the message. Agent messages record the tool calls made
+(shown in the transcript, never re-run).
 
 ## 2. Architecture and data
 
@@ -151,7 +158,7 @@ Serve the built frontend through FastAPI, giving normal use one local URL.
 
 Reuse OpenCode connections without copying credentials into application storage. Initial setup connects OpenAI using ChatGPT sign-in and verifies GPT-6-sol availability. OpenCode documents this subscription authentication option. [OpenCode providers](https://opencode.ai/docs/providers/#openai)
 
-Keep the runtime persona conversational and deny filesystem, shell, web, MCP, and native delegation tools.
+Keep the runtime persona conversational and deny shell, web, MCP, and native delegation tools. File tools are available only per the agent's tool access level, inside its working directory.
 
 **Spending**
 

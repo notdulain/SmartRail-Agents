@@ -23,6 +23,8 @@ describe("MessageList", () => {
               provider_id: "openrouter",
               model_id: "deepseek/deepseek-chat",
               revision: 1,
+              working_directory: null,
+              tool_access: "none",
             },
           }),
         ]}

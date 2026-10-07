@@ -46,6 +46,19 @@ class ErrorResponse(ApiModel):
 
 NAME_MAX = 80
 PERSONA_MAX = 8000
+PATH_MAX = 1024
+
+
+class ToolAccess(StrEnum):
+    """What an agent may do inside its working directory (never outside it).
+
+    ``read_only``: read, list, glob and grep files. ``read_write``: also create and edit files.
+    No level grants shell, web, MCP or delegation tools.
+    """
+
+    NONE = "none"
+    READ_ONLY = "read_only"
+    READ_WRITE = "read_write"
 
 
 class AgentCreate(ApiModel):
@@ -53,6 +66,16 @@ class AgentCreate(ApiModel):
     persona: str = Field(max_length=PERSONA_MAX)
     provider_id: str = Field(min_length=1)
     model_id: str = Field(min_length=1)
+    # Absolute path of an existing directory on this machine. Required unless
+    # ``tool_access`` is ``none``. The server normalizes it (resolved, absolute).
+    working_directory: str | None = Field(default=None, min_length=1, max_length=PATH_MAX)
+    tool_access: ToolAccess = ToolAccess.NONE
+
+    @model_validator(mode="after")
+    def _check_tools(self) -> AgentCreate:
+        if self.tool_access is not ToolAccess.NONE and not self.working_directory:
+            raise ValueError("file tools need a working directory")
+        return self
 
 
 class AgentUpdate(ApiModel):
@@ -63,6 +86,10 @@ class AgentUpdate(ApiModel):
     provider_id: str | None = Field(default=None, min_length=1)
     model_id: str | None = Field(default=None, min_length=1)
     archived: bool | None = None
+    # Send "" to clear the working directory (only valid together with tool_access "none",
+    # or when the agent's tool access is already "none").
+    working_directory: str | None = Field(default=None, max_length=PATH_MAX)
+    tool_access: ToolAccess | None = None
 
 
 class Agent(ApiModel):
@@ -71,7 +98,10 @@ class Agent(ApiModel):
     persona: str
     provider_id: str
     model_id: str
-    # Incremented on every edit of name/persona/provider/model (not on archive).
+    working_directory: str | None = None
+    tool_access: ToolAccess = ToolAccess.NONE
+    # Incremented on every edit of name/persona/provider/model/working_directory/tool_access
+    # (not on archive).
     revision: int = Field(ge=1)
     archived: bool = False
     created_at: datetime
@@ -87,6 +117,50 @@ class AgentSnapshot(ApiModel):
     provider_id: str
     model_id: str
     revision: int = Field(ge=1)
+    working_directory: str | None = None
+    tool_access: ToolAccess = ToolAccess.NONE
+
+
+# --------------------------------------------------------------------------- files
+
+
+class FileRef(ApiModel):
+    """A file inside an agent's working directory, attached to a message with ``@``.
+
+    ``path`` is relative to that agent's working directory and uses ``/`` separators.
+    """
+
+    agent_id: str
+    path: str = Field(min_length=1, max_length=PATH_MAX)
+
+
+class FileEntry(ApiModel):
+    path: str  # relative to the working directory, ``/`` separators
+    is_dir: bool = False
+    size: int | None = None  # bytes, files only
+
+
+class FileSearchResponse(ApiModel):
+    """``GET /api/agents/{id}/files?q=``: matches inside the agent's working directory."""
+
+    root: str  # the agent's working directory (absolute)
+    files: list[FileEntry]
+    truncated: bool = False  # more matches exist than were returned
+
+
+class DirectoryEntry(ApiModel):
+    name: str
+    path: str  # absolute
+
+
+class DirectoryListing(ApiModel):
+    """``GET /api/fs/directories?path=``: sub-directories, for the working-directory picker."""
+
+    path: str  # absolute, normalized; the directory listed
+    parent: str | None = None  # null at a filesystem root
+    entries: list[DirectoryEntry]  # sub-directories only, sorted by name
+    home: str  # the user's home directory
+    roots: list[str]  # filesystem roots (drive letters on Windows, "/" elsewhere)
 
 
 # --------------------------------------------------------------------------- providers
@@ -162,6 +236,22 @@ class MessageRole(StrEnum):
     AGENT = "agent"
 
 
+class ToolCallStatus(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    ERROR = "error"
+
+
+class ToolCall(ApiModel):
+    """One file-tool call an agent made while producing a message (shown, never re-run)."""
+
+    id: str
+    tool: str  # OpenCode tool name: read, list, glob, grep, edit, write, patch, ...
+    title: str  # short human summary, e.g. the file path or search pattern
+    status: ToolCallStatus
+    error: str | None = None
+
+
 class MessageStatus(StrEnum):
     STREAMING = "streaming"
     COMPLETE = "complete"
@@ -186,6 +276,10 @@ class Message(ApiModel):
     error: str | None = None
     error_code: ErrorCode | None = None
     reply_to_id: str | None = None
+    # User messages: files attached with ``@`` (their contents were sent with the message).
+    attachments: list[FileRef] = Field(default_factory=list)
+    # Agent messages: file-tool calls made while producing the message, in call order.
+    tool_calls: list[ToolCall] = Field(default_factory=list)
     # Group discussions: 0 = coordinator agenda, 1 = first round, 2 = peer-response round,
     # 3 = coordinator summary. Null for direct chats and user messages.
     stage: int | None = Field(default=None, ge=0, le=3)
@@ -229,8 +323,13 @@ class Run(ApiModel):
     finished_at: datetime | None = None
 
 
+MAX_ATTACHMENTS = 20
+
+
 class SendMessageRequest(ApiModel):
     content: str = Field(min_length=1, max_length=20000)
+    # Each ``agent_id`` must be a participant of the conversation with a working directory.
+    attachments: list[FileRef] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)
 
 
 class SendMessageResponse(ApiModel):
@@ -272,6 +371,14 @@ class MessageDeltaEvent(_EventBase):
     delta: str
 
 
+class MessageToolEvent(_EventBase):
+    """A tool call started or changed state. Upsert into ``Message.tool_calls`` by ``id``."""
+
+    type: Literal["message.tool"] = "message.tool"
+    message_id: str
+    tool_call: ToolCall
+
+
 class MessageCompletedEvent(_EventBase):
     type: Literal["message.completed"] = "message.completed"
     message: Message  # final content; status complete / cancelled / failed
@@ -302,6 +409,7 @@ RunEvent = Annotated[
     RunStartedEvent
     | MessageStartedEvent
     | MessageDeltaEvent
+    | MessageToolEvent
     | MessageCompletedEvent
     | RunCompletedEvent
     | RunFailedEvent

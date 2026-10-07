@@ -39,10 +39,25 @@
             "title": "Revision",
             "type": "integer"
           },
+          "tool_access": {
+            "$ref": "#/components/schemas/ToolAccess",
+            "default": "none"
+          },
           "updated_at": {
             "format": "date-time",
             "title": "Updated At",
             "type": "string"
+          },
+          "working_directory": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Working Directory"
           }
         },
         "required": [
@@ -81,6 +96,23 @@
             "minLength": 1,
             "title": "Provider Id",
             "type": "string"
+          },
+          "tool_access": {
+            "$ref": "#/components/schemas/ToolAccess",
+            "default": "none"
+          },
+          "working_directory": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Working Directory"
           }
         },
         "required": [
@@ -120,6 +152,22 @@
             "minimum": 1,
             "title": "Revision",
             "type": "integer"
+          },
+          "tool_access": {
+            "$ref": "#/components/schemas/ToolAccess",
+            "default": "none"
+          },
+          "working_directory": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Working Directory"
           }
         },
         "required": [
@@ -196,6 +244,28 @@
               }
             ],
             "title": "Provider Id"
+          },
+          "tool_access": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ToolAccess"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "working_directory": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Working Directory"
           }
         },
         "title": "AgentUpdate",
@@ -341,6 +411,72 @@
         "title": "ConversationType",
         "type": "string"
       },
+      "DirectoryEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "path"
+        ],
+        "title": "DirectoryEntry",
+        "type": "object"
+      },
+      "DirectoryListing": {
+        "additionalProperties": false,
+        "description": "``GET /api/fs/directories?path=``: sub-directories, for the working-directory picker.",
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/DirectoryEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "home": {
+            "title": "Home",
+            "type": "string"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "roots": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Roots",
+            "type": "array"
+          }
+        },
+        "required": [
+          "path",
+          "entries",
+          "home",
+          "roots"
+        ],
+        "title": "DirectoryListing",
+        "type": "object"
+      },
       "ErrorCode": {
         "enum": [
           "not_found",
@@ -382,6 +518,86 @@
           "message"
         ],
         "title": "ErrorResponse",
+        "type": "object"
+      },
+      "FileEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "is_dir": {
+            "default": false,
+            "title": "Is Dir",
+            "type": "boolean"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "FileEntry",
+        "type": "object"
+      },
+      "FileRef": {
+        "additionalProperties": false,
+        "description": "A file inside an agent's working directory, attached to a message with ``@``.\n\n``path`` is relative to that agent's working directory and uses ``/`` separators.",
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "path"
+        ],
+        "title": "FileRef",
+        "type": "object"
+      },
+      "FileSearchResponse": {
+        "additionalProperties": false,
+        "description": "``GET /api/agents/{id}/files?q=``: matches inside the agent's working directory.",
+        "properties": {
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/FileEntry"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "root": {
+            "title": "Root",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "root",
+          "files"
+        ],
+        "title": "FileSearchResponse",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -435,6 +651,13 @@
               }
             ],
             "default": null
+          },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/FileRef"
+            },
+            "title": "Attachments",
+            "type": "array"
           },
           "content": {
             "title": "Content",
@@ -547,6 +770,13 @@
           },
           "status": {
             "$ref": "#/components/schemas/MessageStatus"
+          },
+          "tool_calls": {
+            "items": {
+              "$ref": "#/components/schemas/ToolCall"
+            },
+            "title": "Tool Calls",
+            "type": "array"
           }
         },
         "required": [
@@ -674,6 +904,42 @@
         ],
         "title": "MessageStatus",
         "type": "string"
+      },
+      "MessageToolEvent": {
+        "additionalProperties": false,
+        "description": "A tool call started or changed state. Upsert into ``Message.tool_calls`` by ``id``.",
+        "properties": {
+          "message_id": {
+            "title": "Message Id",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "seq": {
+            "minimum": 1,
+            "title": "Seq",
+            "type": "integer"
+          },
+          "tool_call": {
+            "$ref": "#/components/schemas/ToolCall"
+          },
+          "type": {
+            "const": "message.tool",
+            "default": "message.tool",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "run_id",
+          "message_id",
+          "tool_call"
+        ],
+        "title": "MessageToolEvent",
+        "type": "object"
       },
       "ModelInfo": {
         "additionalProperties": false,
@@ -953,6 +1219,7 @@
             "message.completed": "#/components/schemas/MessageCompletedEvent",
             "message.delta": "#/components/schemas/MessageDeltaEvent",
             "message.started": "#/components/schemas/MessageStartedEvent",
+            "message.tool": "#/components/schemas/MessageToolEvent",
             "run.cancelled": "#/components/schemas/RunCancelledEvent",
             "run.completed": "#/components/schemas/RunCompletedEvent",
             "run.failed": "#/components/schemas/RunFailedEvent",
@@ -970,6 +1237,9 @@
           },
           {
             "$ref": "#/components/schemas/MessageDeltaEvent"
+          },
+          {
+            "$ref": "#/components/schemas/MessageToolEvent"
           },
           {
             "$ref": "#/components/schemas/MessageCompletedEvent"
@@ -1097,6 +1367,14 @@
       "SendMessageRequest": {
         "additionalProperties": false,
         "properties": {
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/FileRef"
+            },
+            "maxItems": 20,
+            "title": "Attachments",
+            "type": "array"
+          },
           "content": {
             "maxLength": 20000,
             "minLength": 1,
@@ -1240,6 +1518,66 @@
         },
         "title": "SettingsUpdate",
         "type": "object"
+      },
+      "ToolAccess": {
+        "description": "What an agent may do inside its working directory (never outside it).\n\n``read_only``: read, list, glob and grep files. ``read_write``: also create and edit files.\nNo level grants shell, web, MCP or delegation tools.",
+        "enum": [
+          "none",
+          "read_only",
+          "read_write"
+        ],
+        "title": "ToolAccess",
+        "type": "string"
+      },
+      "ToolCall": {
+        "additionalProperties": false,
+        "description": "One file-tool call an agent made while producing a message (shown, never re-run).",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ToolCallStatus"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tool",
+          "title",
+          "status"
+        ],
+        "title": "ToolCall",
+        "type": "object"
+      },
+      "ToolCallStatus": {
+        "enum": [
+          "running",
+          "completed",
+          "error"
+        ],
+        "title": "ToolCallStatus",
+        "type": "string"
       },
       "Usage": {
         "additionalProperties": false,
@@ -1487,6 +1825,89 @@
         "summary": "Update Agent"
       }
     },
+    "/api/agents/{agent_id}/files": {
+      "get": {
+        "description": "Files (and directories) in the agent's working directory whose relative path matches\n``q`` (case-insensitive subsequence; empty ``q`` lists recently modified files first).\nSkips VCS/dependency/build folders. 422 ``validation_error`` if the agent has no working\ndirectory or it no longer exists.",
+        "operationId": "search_agent_files_api_agents__agent_id__files_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 200,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileSearchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "Search Agent Files"
+      }
+    },
     "/api/conversations": {
       "get": {
         "operationId": "list_conversations_api_conversations_get",
@@ -1691,7 +2112,7 @@
     },
     "/api/conversations/{conversation_id}/messages": {
       "post": {
-        "description": "Store the user message and start a run (one agent turn for direct chats; one bounded\ntwo-round exchange for group discussions). 409 ``run_active`` if a run is in progress.",
+        "description": "Store the user message and start a run (one agent turn for direct chats; one bounded\ntwo-round exchange for group discussions). 409 ``run_active`` if a run is in progress.\nAttached files are read now and their text is sent with the message; 422\n``validation_error`` if one is missing, outside the working directory, binary or too\nlarge.",
         "operationId": "send_message_api_conversations__conversation_id__messages_post",
         "parameters": [
           {
@@ -1757,6 +2178,74 @@
           }
         },
         "summary": "Send Message"
+      }
+    },
+    "/api/fs/directories": {
+      "get": {
+        "description": "Sub-directories of ``path`` (default: the user's home) for the working-directory\npicker. 422 ``validation_error`` if ``path`` is not an existing directory.",
+        "operationId": "list_directories_api_fs_directories_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 1024,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectoryListing"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "List Directories"
       }
     },
     "/api/health": {

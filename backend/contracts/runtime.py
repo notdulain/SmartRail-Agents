@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
-from .models import ErrorCode, ProvidersResponse, Usage
+from .models import ErrorCode, ProvidersResponse, ToolAccess, ToolCall, Usage
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,11 @@ class CompletionRequest:
     runtime uses a single neutral, tool-disabled OpenCode agent). ``user_text`` is the new
     text for this turn (for group turns, the transcript the participant has not yet seen).
     OpenCode session history supplies earlier context.
+
+    ``directory`` is the agent's working directory (absolute) and must equal the directory the
+    session was created with. ``tool_access`` decides which file tools the model may use in
+    this turn; the runtime enforces it (``none`` means no tools at all) and never lets a tool
+    reach outside ``directory``.
     """
 
     session_id: str
@@ -32,12 +37,22 @@ class CompletionRequest:
     system: str
     user_text: str
     max_output_tokens: int
+    directory: str | None = None
+    tool_access: ToolAccess = ToolAccess.NONE
 
 
 @dataclass(frozen=True)
 class TextDelta:
     text: str
     type: Literal["delta"] = "delta"
+
+
+@dataclass(frozen=True)
+class ToolActivity:
+    """A file-tool call started or changed state (same ``call.id`` = same call)."""
+
+    call: ToolCall
+    type: Literal["tool"] = "tool"
 
 
 @dataclass(frozen=True)
@@ -54,7 +69,7 @@ class Failed:
     type: Literal["failed"] = "failed"
 
 
-RuntimeEvent = TextDelta | Completed | Failed
+RuntimeEvent = TextDelta | ToolActivity | Completed | Failed
 
 
 class RuntimeUnavailableError(Exception):
@@ -71,18 +86,24 @@ class OpenCodeRuntime(Protocol):
         """Provider/model catalog from OpenCode. ``refresh=True`` bypasses any cache."""
         ...
 
-    async def create_session(self, title: str) -> str:
-        """Create an OpenCode session and return its ID."""
+    async def create_session(self, title: str, directory: str | None = None) -> str:
+        """Create an OpenCode session and return its ID.
+
+        ``directory`` (absolute) scopes the session to an agent's working directory; ``None``
+        uses the runtime's neutral directory. A session's directory never changes.
+        """
         ...
 
     def stream(self, request: CompletionRequest) -> AsyncIterator[RuntimeEvent]:
-        """Run one turn, yielding TextDelta* then exactly one Completed or Failed.
+        """Run one turn, yielding (TextDelta | ToolActivity)* then one Completed or Failed.
 
         Contract:
         - Never raises for provider/model/rate-limit problems; yields ``Failed`` instead.
         - If the consuming task is cancelled or the iterator is closed early, the runtime
           must abort the in-flight OpenCode generation for ``request.session_id``.
-        - Tools are disabled; the model only produces conversational text.
+        - Only the file tools allowed by ``request.tool_access`` are available, confined to
+          ``request.directory``; shell, web, MCP and delegation tools are always denied.
+        - A turn that used tools must still end with reply text; an empty reply fails as before.
         """
         ...
 

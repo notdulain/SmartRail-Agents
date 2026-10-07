@@ -117,6 +117,7 @@ export function AgentEditorDialog({ agent, onClose }: Props) {
           persona,
           provider_id: choice.providerId,
           model_id: choice.modelId,
+          tool_access: "none",
         });
       }
       await refreshAgents();

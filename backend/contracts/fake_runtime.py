@@ -11,8 +11,17 @@ import itertools
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
-from .models import ErrorCode, ModelInfo, ModelPrice, ProviderInfo, ProvidersResponse, Usage
-from .runtime import Completed, CompletionRequest, Failed, RuntimeEvent, TextDelta
+from .models import (
+    ErrorCode,
+    ModelInfo,
+    ModelPrice,
+    ProviderInfo,
+    ProvidersResponse,
+    ToolCall,
+    ToolCallStatus,
+    Usage,
+)
+from .runtime import Completed, CompletionRequest, Failed, RuntimeEvent, TextDelta, ToolActivity
 
 DEFAULT_PROVIDERS = (
     ProviderInfo(
@@ -60,6 +69,9 @@ class FakeRuntime:
         self.aborted: list[str] = []
         self.fail_models: dict[tuple[str, str], Failed] = {}
         self.stall_models: set[tuple[str, str]] = set()  # never finish; for Stop tests
+        # Tool calls (tool, title) to report before replying, per model.
+        self.tool_models: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        self.sessions: dict[str, str | None] = {}  # session id -> directory
         self.healthy = True
         self._ids = itertools.count(1)
 
@@ -69,8 +81,10 @@ class FakeRuntime:
     async def list_providers(self, refresh: bool = False) -> ProvidersResponse:
         return ProvidersResponse(providers=self.providers, refreshed_at=datetime.now(UTC))
 
-    async def create_session(self, title: str) -> str:
-        return f"ses_fake_{next(self._ids)}"
+    async def create_session(self, title: str, directory: str | None = None) -> str:
+        session_id = f"ses_fake_{next(self._ids)}"
+        self.sessions[session_id] = directory
+        return session_id
 
     def _model_available(self, provider_id: str, model_id: str) -> Failed | None:
         for provider in self.providers:
@@ -93,6 +107,12 @@ class FakeRuntime:
             if key in self.stall_models:
                 yield TextDelta("...")
                 await asyncio.Event().wait()
+            for n, (tool, title) in enumerate(self.tool_models.get(key, ()), start=1):
+                call_id = f"{request.session_id}_call_{n}"
+                yield ToolActivity(ToolCall(id=call_id, tool=tool, title=title,
+                                            status=ToolCallStatus.RUNNING))
+                yield ToolActivity(ToolCall(id=call_id, tool=tool, title=title,
+                                            status=ToolCallStatus.COMPLETED))
             words = text.split(" ")
             for i, word in enumerate(words):
                 if self.chunk_delay:

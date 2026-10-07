@@ -39,6 +39,29 @@ export interface paths {
         patch: operations["update_agent_api_agents__agent_id__patch"];
         trace?: never;
     };
+    "/api/agents/{agent_id}/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Agent Files
+         * @description Files (and directories) in the agent's working directory whose relative path matches
+         *     ``q`` (case-insensitive subsequence; empty ``q`` lists recently modified files first).
+         *     Skips VCS/dependency/build folders. 422 ``validation_error`` if the agent has no working
+         *     directory or it no longer exists.
+         */
+        get: operations["search_agent_files_api_agents__agent_id__files_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/conversations": {
         parameters: {
             query?: never;
@@ -107,8 +130,32 @@ export interface paths {
          * Send Message
          * @description Store the user message and start a run (one agent turn for direct chats; one bounded
          *     two-round exchange for group discussions). 409 ``run_active`` if a run is in progress.
+         *     Attached files are read now and their text is sent with the message; 422
+         *     ``validation_error`` if one is missing, outside the working directory, binary or too
+         *     large.
          */
         post: operations["send_message_api_conversations__conversation_id__messages_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/fs/directories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Directories
+         * @description Sub-directories of ``path`` (default: the user's home) for the working-directory
+         *     picker. 422 ``validation_error`` if ``path`` is not an existing directory.
+         */
+        get: operations["list_directories_api_fs_directories_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -252,11 +299,15 @@ export interface components {
             provider_id: string;
             /** Revision */
             revision: number;
+            /** @default none */
+            tool_access: components["schemas"]["ToolAccess"];
             /**
              * Updated At
              * Format: date-time
              */
             updated_at: string;
+            /** Working Directory */
+            working_directory?: string | null;
         };
         /** AgentCreate */
         AgentCreate: {
@@ -268,6 +319,10 @@ export interface components {
             persona: string;
             /** Provider Id */
             provider_id: string;
+            /** @default none */
+            tool_access: components["schemas"]["ToolAccess"];
+            /** Working Directory */
+            working_directory?: string | null;
         };
         /**
          * AgentSnapshot
@@ -286,6 +341,13 @@ export interface components {
             provider_id: string;
             /** Revision */
             revision: number;
+            /** @default none */
+            tool_access: components["schemas"]["ToolAccess"];
+            /**
+             * Working Directory
+             * @default null
+             */
+            working_directory: string | null;
         };
         /**
          * AgentUpdate
@@ -302,6 +364,9 @@ export interface components {
             persona?: string | null;
             /** Provider Id */
             provider_id?: string | null;
+            tool_access?: components["schemas"]["ToolAccess"] | null;
+            /** Working Directory */
+            working_directory?: string | null;
         };
         /** Conversation */
         Conversation: {
@@ -348,6 +413,29 @@ export interface components {
          * @enum {string}
          */
         ConversationType: "direct" | "group";
+        /** DirectoryEntry */
+        DirectoryEntry: {
+            /** Name */
+            name: string;
+            /** Path */
+            path: string;
+        };
+        /**
+         * DirectoryListing
+         * @description ``GET /api/fs/directories?path=``: sub-directories, for the working-directory picker.
+         */
+        DirectoryListing: {
+            /** Entries */
+            entries: components["schemas"]["DirectoryEntry"][];
+            /** Home */
+            home: string;
+            /** Parent */
+            parent?: string | null;
+            /** Path */
+            path: string;
+            /** Roots */
+            roots: string[];
+        };
         /**
          * ErrorCode
          * @enum {string}
@@ -360,6 +448,45 @@ export interface components {
             code: components["schemas"]["ErrorCode"];
             /** Message */
             message: string;
+        };
+        /** FileEntry */
+        FileEntry: {
+            /**
+             * Is Dir
+             * @default false
+             */
+            is_dir: boolean;
+            /** Path */
+            path: string;
+            /** Size */
+            size?: number | null;
+        };
+        /**
+         * FileRef
+         * @description A file inside an agent's working directory, attached to a message with ``@``.
+         *
+         *     ``path`` is relative to that agent's working directory and uses ``/`` separators.
+         */
+        FileRef: {
+            /** Agent Id */
+            agent_id: string;
+            /** Path */
+            path: string;
+        };
+        /**
+         * FileSearchResponse
+         * @description ``GET /api/agents/{id}/files?q=``: matches inside the agent's working directory.
+         */
+        FileSearchResponse: {
+            /** Files */
+            files: components["schemas"]["FileEntry"][];
+            /** Root */
+            root: string;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -383,6 +510,8 @@ export interface components {
         Message: {
             /** @default null */
             agent: components["schemas"]["AgentSnapshot"] | null;
+            /** Attachments */
+            attachments?: components["schemas"]["FileRef"][];
             /** Content */
             content: string;
             /** Conversation Id */
@@ -430,6 +559,8 @@ export interface components {
              */
             stage: number | null;
             status: components["schemas"]["MessageStatus"];
+            /** Tool Calls */
+            tool_calls?: components["schemas"]["ToolCall"][];
         };
         /** MessageCompletedEvent */
         MessageCompletedEvent: {
@@ -483,6 +614,24 @@ export interface components {
          * @enum {string}
          */
         MessageStatus: "streaming" | "complete" | "cancelled" | "failed";
+        /**
+         * MessageToolEvent
+         * @description A tool call started or changed state. Upsert into ``Message.tool_calls`` by ``id``.
+         */
+        MessageToolEvent: {
+            /** Message Id */
+            message_id: string;
+            /** Run Id */
+            run_id: string;
+            /** Seq */
+            seq: number;
+            tool_call: components["schemas"]["ToolCall"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "message.tool";
+        };
         /** ModelInfo */
         ModelInfo: {
             /** Context Limit */
@@ -580,7 +729,7 @@ export interface components {
              */
             type: "run.completed";
         };
-        RunEvent: components["schemas"]["RunStartedEvent"] | components["schemas"]["MessageStartedEvent"] | components["schemas"]["MessageDeltaEvent"] | components["schemas"]["MessageCompletedEvent"] | components["schemas"]["RunCompletedEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["RunPausedEvent"];
+        RunEvent: components["schemas"]["RunStartedEvent"] | components["schemas"]["MessageStartedEvent"] | components["schemas"]["MessageDeltaEvent"] | components["schemas"]["MessageToolEvent"] | components["schemas"]["MessageCompletedEvent"] | components["schemas"]["RunCompletedEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["RunPausedEvent"];
         /** RunFailedEvent */
         RunFailedEvent: {
             run: components["schemas"]["Run"];
@@ -629,6 +778,8 @@ export interface components {
         RunStatus: "running" | "completed" | "cancelled" | "failed" | "paused";
         /** SendMessageRequest */
         SendMessageRequest: {
+            /** Attachments */
+            attachments?: components["schemas"]["FileRef"][];
             /** Content */
             content: string;
         };
@@ -682,6 +833,38 @@ export interface components {
             /** Project Brief */
             project_brief?: string | null;
         };
+        /**
+         * ToolAccess
+         * @description What an agent may do inside its working directory (never outside it).
+         *
+         *     ``read_only``: read, list, glob and grep files. ``read_write``: also create and edit files.
+         *     No level grants shell, web, MCP or delegation tools.
+         * @enum {string}
+         */
+        ToolAccess: "none" | "read_only" | "read_write";
+        /**
+         * ToolCall
+         * @description One file-tool call an agent made while producing a message (shown, never re-run).
+         */
+        ToolCall: {
+            /**
+             * Error
+             * @default null
+             */
+            error: string | null;
+            /** Id */
+            id: string;
+            status: components["schemas"]["ToolCallStatus"];
+            /** Title */
+            title: string;
+            /** Tool */
+            tool: string;
+        };
+        /**
+         * ToolCallStatus
+         * @enum {string}
+         */
+        ToolCallStatus: "running" | "completed" | "error";
         /** Usage */
         Usage: {
             /**
@@ -826,6 +1009,58 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Agent"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    search_agent_files_api_agents__agent_id__files_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileSearchResponse"];
                 };
             };
             /** @description Not Found */
@@ -1049,6 +1284,55 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SendMessageResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    list_directories_api_fs_directories_get: {
+        parameters: {
+            query?: {
+                path?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DirectoryListing"];
                 };
             };
             /** @description Not Found */
