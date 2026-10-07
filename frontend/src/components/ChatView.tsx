@@ -124,6 +124,9 @@ export function ChatView({
           ) : (
             <MessageList
               messages={state.messages}
+              attachmentAgentName={
+                isGroup ? (id) => agents.find((a) => a.id === id)?.name : undefined
+              }
               onEditAgent={(id) => {
                 const agent = agents.find((a) => a.id === id);
                 if (agent) onEditAgent(agent);

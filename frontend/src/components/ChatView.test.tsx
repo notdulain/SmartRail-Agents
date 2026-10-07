@@ -258,6 +258,30 @@ describe("ChatView loading and resuming", () => {
     expect(resume.url.searchParams.get("after")).toBe("2");
   });
 
+  it("shows tool activity live from message.tool events", async () => {
+    const live = liveSse();
+    setup({
+      "GET /api/conversations/cnv_1": () =>
+        detail({ messages: [makeUserMessage()], active_run_id: "run_1" }),
+      "GET /api/runs/run_1/events": () => live.response,
+    });
+    await screen.findByRole("button", { name: "Stop" });
+    const tool = (seq: number, status: string): Ev => ({
+      ...base,
+      seq,
+      type: "message.tool",
+      message_id: "m1",
+      tool_call: { id: "t1", tool: "read", title: "README.md", status, error: null },
+    });
+    live.push(started(1));
+    live.push(tool(2, "running"));
+    expect(await screen.findByRole("button", { name: /Reading\s+README\.md/ })).toBeInTheDocument();
+    live.push(tool(3, "completed"));
+    live.push(delta(4, "Done reading"));
+    expect(await screen.findByRole("button", { name: /Used 1 tool/ })).toBeInTheDocument();
+    expect(screen.getByText("Done reading")).toBeInTheDocument();
+  });
+
   it("shows a loading state and then the transcript", async () => {
     setup({
       "GET /api/conversations/cnv_1": () =>

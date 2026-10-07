@@ -2,6 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { makeMessage, makeUserMessage } from "../test/fixtures";
+import type { ToolCall } from "../api/types";
 import { MessageList } from "./MessageList";
 
 describe("MessageList", () => {
@@ -144,5 +145,131 @@ describe("MessageList", () => {
       />,
     );
     expect(screen.queryByRole("button", { name: "Edit agent" })).not.toBeInTheDocument();
+  });
+});
+
+describe("MessageList attachments and tool calls", () => {
+  const call = (over: Partial<ToolCall>): ToolCall => ({
+    id: "t1",
+    tool: "read",
+    title: "docs/README.md",
+    status: "completed",
+    error: null,
+    ...over,
+  });
+
+  it("shows files attached to user messages", () => {
+    render(
+      <MessageList
+        messages={[
+          makeUserMessage({
+            attachments: [
+              { agent_id: "agt_1", path: "src/main.ts" },
+              { agent_id: "agt_2", path: "notes.md" },
+            ],
+          }),
+        ]}
+      />,
+    );
+    const list = screen.getByRole("list", { name: "Attached files" });
+    const items = within(list).getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent("src/main.ts");
+    expect(items[1]).toHaveTextContent("notes.md");
+    expect(within(list).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("labels attachments with the agent name in group chats", () => {
+    render(
+      <MessageList
+        attachmentAgentName={(id) => ({ agt_1: "Driver", agt_2: "Guard" })[id]}
+        messages={[
+          makeUserMessage({
+            attachments: [
+              { agent_id: "agt_1", path: "a.md" },
+              { agent_id: "agt_2", path: "b.md" },
+            ],
+          }),
+        ]}
+      />,
+    );
+    const items = within(screen.getByRole("list", { name: "Attached files" })).getAllByRole("listitem");
+    expect(items[0]).toHaveTextContent("Drivera.md");
+    expect(items[1]).toHaveTextContent("Guardb.md");
+  });
+
+  it("collapses finished tool calls into a summary that expands to the list", async () => {
+    render(
+      <MessageList
+        messages={[
+          makeMessage({
+            tool_calls: [
+              call({ id: "t1" }),
+              call({ id: "t2", tool: "grep", title: "TODO" }),
+              call({ id: "t3", tool: "edit", title: "src/a.ts", status: "error", error: "File is read-only" }),
+            ],
+          }),
+        ]}
+      />,
+    );
+    const toggle = screen.getByRole("button", { name: /Used 3 tools\s*· 1 failed/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("list", { name: "Tool calls" })).not.toBeInTheDocument();
+
+    await userEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const items = within(screen.getByRole("list", { name: "Tool calls" })).getAllByRole("listitem");
+    expect(items.map((i) => i.textContent)).toEqual([
+      "Done:read·docs/README.md",
+      "Done:grep·TODO",
+      "Failed:edit·src/a.tsFile is read-only",
+    ]);
+
+    await userEvent.click(toggle);
+    expect(screen.queryByRole("list", { name: "Tool calls" })).not.toBeInTheDocument();
+  });
+
+  it("shows the running tool live while the message streams", async () => {
+    const streaming = makeMessage({
+      status: "streaming",
+      content: "",
+      tool_calls: [call({ id: "t1" }), call({ id: "t2", tool: "grep", title: "delay", status: "running" })],
+    });
+    const { rerender } = render(<MessageList messages={[streaming]} />);
+    const toggle = screen.getByRole("button", { name: /Searching\s+delay\s*\(2 tools\)/ });
+    await userEvent.click(toggle);
+    expect(screen.getByText("Running:")).toBeInTheDocument();
+
+    rerender(
+      <MessageList
+        messages={[
+          {
+            ...streaming,
+            status: "complete",
+            content: "Found it",
+            tool_calls: [call({ id: "t1" }), call({ id: "t2", tool: "grep", title: "delay" })],
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /Used 2 tools/ })).toBeInTheDocument();
+    expect(screen.queryByText("Running:")).not.toBeInTheDocument();
+  });
+
+  it("marks calls left running in a stopped message as unfinished", async () => {
+    render(
+      <MessageList
+        messages={[
+          makeMessage({ status: "cancelled", tool_calls: [call({ status: "running" })] }),
+        ]}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /Used 1 tool$/ }));
+    expect(screen.getByText("Did not finish:")).toBeInTheDocument();
+  });
+
+  it("renders nothing extra for messages without tool calls", () => {
+    render(<MessageList messages={[makeMessage({ tool_calls: [] })]} />);
+    expect(screen.queryByRole("button", { name: /Used/ })).not.toBeInTheDocument();
   });
 });
