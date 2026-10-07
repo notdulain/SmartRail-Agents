@@ -26,6 +26,7 @@ from backend.contracts.models import (
     MessageRole,
     MessageStartedEvent,
     MessageStatus,
+    MessageToolEvent,
     ProvidersResponse,
     Run,
     RunCancelledEvent,
@@ -34,6 +35,8 @@ from backend.contracts.models import (
     RunPausedEvent,
     RunStartedEvent,
     RunStatus,
+    ToolCall,
+    ToolCallStatus,
     Usage,
 )
 from backend.contracts.runtime import (
@@ -43,6 +46,7 @@ from backend.contracts.runtime import (
     OpenCodeRuntime,
     RuntimeUnavailableError,
     TextDelta,
+    ToolActivity,
 )
 
 from . import budget, prompts
@@ -54,6 +58,21 @@ from .util import new_id, utcnow
 log = logging.getLogger(__name__)
 
 INTERRUPTED = "interrupted by restart"
+
+# Error recorded on tool calls still running when their message ends.
+TOOL_CANCELLED = "cancelled"
+TOOL_INTERRUPTED = "interrupted"
+TOOL_UNFINISHED = "no result reported"
+
+
+def settle_tool_calls(calls: Sequence[ToolCall], error: str) -> list[ToolCall]:
+    """Mark calls that never reported an outcome as failed, so none stays "running"."""
+    return [
+        c.model_copy(update={"status": ToolCallStatus.ERROR, "error": error})
+        if c.status is ToolCallStatus.RUNNING
+        else c
+        for c in calls
+    ]
 
 
 class Notifier:
@@ -241,15 +260,26 @@ class RunManager:
             active.notifier.notify()
 
     async def _run_direct(self, active: ActiveRun) -> TurnOutcome:
-        assert active.user_message is not None
+        assert active.user_message is not None and active.conversation is not None
         speaker = active.run.participants[0]
+        user_text = active.user_message.content
+        conv_id = active.conversation.id
+        session = await self.store.usable_session(
+            conv_id, speaker.agent_id, speaker.working_directory
+        )
+        if session is None:
+            # A fresh session (first turn, or the agent's directory changed) has no history:
+            # give it the earlier visible transcript so the conversation carries on.
+            user_ord = await self.store.message_ord(active.user_message.id)
+            earlier = [m for o, m in await self.store.messages_after(conv_id, 0) if o < user_ord]
+            user_text = prompts.with_history(prompts.format_transcript(earlier), user_text)
         return await self.run_turn(
             active,
             speaker=speaker,
             stage=None,
             reply_to_id=None,
             system=prompts.system_text(speaker.persona, active.brief),
-            user_text=active.user_message.content,
+            user_text=user_text,
             max_tokens=active.participant_max_tokens,
         )
 
@@ -321,8 +351,16 @@ class RunManager:
         error: str | None = None,
         code: ErrorCode | None = None,
     ) -> None:
+        tool_error = TOOL_CANCELLED if status is MessageStatus.CANCELLED else TOOL_INTERRUPTED
         for msg in await self.store.streaming_messages(active.run_id):
-            done = msg.model_copy(update={"status": status, "error": error, "error_code": code})
+            done = msg.model_copy(
+                update={
+                    "status": status,
+                    "error": error,
+                    "error_code": code,
+                    "tool_calls": settle_tool_calls(msg.tool_calls, tool_error),
+                }
+            )
             extra = [self.store.stmt_finish_message(done)]
             if msg.content and msg.agent:
                 ord_ = await self.store.message_ord(msg.id)
@@ -422,15 +460,15 @@ class RunManager:
     async def _session_for(self, active: ActiveRun, speaker: AgentSnapshot) -> str:
         assert active.conversation is not None
         conv_id = active.conversation.id
-        found = await self.store.get_session(conv_id, speaker.agent_id)
+        directory = speaker.working_directory
+        found = await self.store.usable_session(conv_id, speaker.agent_id, directory)
         if found:
-            return found[0]
+            return found.session_id
         session_id = await self.runtime.create_session(
-            f"SmartRail: {active.conversation.title} / {speaker.name}"
+            f"SmartRail: {active.conversation.title} / {speaker.name}", directory
         )
-        await self.store.put_session(conv_id, speaker.agent_id, session_id)
-        found = await self.store.get_session(conv_id, speaker.agent_id)
-        return found[0] if found else session_id
+        await self.store.put_session(conv_id, speaker.agent_id, session_id, directory)
+        return session_id
 
     async def run_turn(
         self,
@@ -487,6 +525,7 @@ class RunManager:
         own_ord = await self.store.message_ord(message.id)
 
         text = ""
+        calls: dict[str, ToolCall] = {}  # by id, in first-seen order
         got_text = False
         final: Completed | None = None
         failure: Failed | None = None
@@ -501,6 +540,8 @@ class RunManager:
                     system=system,
                     user_text=user_text,
                     max_output_tokens=max_tokens,
+                    directory=speaker.working_directory,
+                    tool_access=speaker.tool_access,
                 )
                 async with aclosing(self.runtime.stream(request)) as events:
                     async for event in events:
@@ -517,6 +558,16 @@ class RunManager:
                                 [self.store.stmt_append_content(message.id, event.text)],
                                 message_id=message.id,
                                 delta=event.text,
+                            )
+                        elif isinstance(event, ToolActivity):
+                            call = event.call
+                            calls[call.id] = call
+                            await self.emit(
+                                active,
+                                MessageToolEvent,
+                                [self.store.stmt_set_tool_calls(message.id, list(calls.values()))],
+                                message_id=message.id,
+                                tool_call=call,
                             )
                         elif isinstance(event, Completed):
                             final = event
@@ -555,7 +606,11 @@ class RunManager:
                 )
                 extra.append(self.store.stmt_add_spend(billed))
             done = message.model_copy(
-                update={"content": final.text or text, "status": MessageStatus.COMPLETE}
+                update={
+                    "content": final.text or text,
+                    "status": MessageStatus.COMPLETE,
+                    "tool_calls": settle_tool_calls(list(calls.values()), TOOL_UNFINISHED),
+                }
             )
             await self.emit(
                 active,
@@ -586,6 +641,7 @@ class RunManager:
                 "status": MessageStatus.FAILED,
                 "error": failure.message,
                 "error_code": failure.code,
+                "tool_calls": settle_tool_calls(list(calls.values()), TOOL_INTERRUPTED),
             }
         )
         await self.emit(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 import aiosqlite
 
@@ -18,6 +18,7 @@ from backend.contracts.models import (
     Conversation,
     ConversationType,
     ErrorCode,
+    FileRef,
     Message,
     MessageRole,
     MessageStatus,
@@ -25,6 +26,7 @@ from backend.contracts.models import (
     RunStatus,
     Settings,
     ToolAccess,
+    ToolCall,
     Usage,
 )
 
@@ -76,9 +78,23 @@ def _message(row: aiosqlite.Row) -> Message:
         error=row["error"],
         error_code=ErrorCode(row["error_code"]) if row["error_code"] else None,
         reply_to_id=row["reply_to_id"],
+        attachments=[
+            FileRef.model_validate(a) for a in json.loads(row["attachments_json"] or "[]")
+        ],
+        tool_calls=[ToolCall.model_validate(c) for c in json.loads(row["tool_calls_json"] or "[]")],
         stage=row["stage"],
         created_at=parse_dt(row["created_at"]),
     )
+
+
+def _json_list(items: Sequence[FileRef] | Sequence[ToolCall]) -> str | None:
+    return json.dumps([i.model_dump(mode="json") for i in items]) if items else None
+
+
+class SessionRow(NamedTuple):
+    session_id: str
+    seen_ord: int  # last message ordinal the session has been shown
+    directory: str | None  # the directory the session was created with
 
 
 def _run(row: aiosqlite.Row) -> Run:
@@ -283,11 +299,13 @@ class Store:
     # ------------------------------------------------------------------ messages
 
     @staticmethod
-    def stmt_insert_message(msg: Message) -> Statement:
+    def stmt_insert_message(msg: Message, attachments_text: str | None = None) -> Statement:
+        """``attachments_text``: the attached files exactly as rendered for the model."""
         return (
             "INSERT INTO messages (id, conversation_id, run_id, role, speaker_name, agent_json,"
             " provider_id, model_id, content, status, error, error_code, reply_to_id, stage,"
-            " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " attachments_json, attachments_text, tool_calls_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 msg.id,
                 msg.conversation_id,
@@ -303,6 +321,9 @@ class Store:
                 msg.error_code.value if msg.error_code else None,
                 msg.reply_to_id,
                 msg.stage,
+                _json_list(msg.attachments),
+                attachments_text,
+                _json_list(msg.tool_calls),
                 iso(msg.created_at),
             ),
         )
@@ -314,15 +335,36 @@ class Store:
     @staticmethod
     def stmt_finish_message(msg: Message) -> Statement:
         return (
-            "UPDATE messages SET content = ?, status = ?, error = ?, error_code = ? WHERE id = ?",
+            "UPDATE messages SET content = ?, status = ?, error = ?, error_code = ?,"
+            " tool_calls_json = ? WHERE id = ?",
             (
                 msg.content,
                 msg.status.value,
                 msg.error,
                 msg.error_code.value if msg.error_code else None,
+                _json_list(msg.tool_calls),
                 msg.id,
             ),
         )
+
+    @staticmethod
+    def stmt_set_tool_calls(message_id: str, calls: Sequence[ToolCall]) -> Statement:
+        return (
+            "UPDATE messages SET tool_calls_json = ? WHERE id = ?",
+            (_json_list(calls), message_id),
+        )
+
+    async def attachment_texts(self, message_ids: Sequence[str]) -> dict[str, str]:
+        """Rendered attachments of the given messages (only those that have any)."""
+        if not message_ids:
+            return {}
+        marks = ",".join("?" for _ in message_ids)
+        rows = await self.db.fetchall(
+            f"SELECT id, attachments_text FROM messages WHERE id IN ({marks})"
+            " AND attachments_text IS NOT NULL",
+            list(message_ids),
+        )
+        return {r["id"]: r["attachments_text"] for r in rows}
 
     async def get_message(self, message_id: str) -> Message | None:
         row = await self.db.fetchone("SELECT * FROM messages WHERE id = ?", (message_id,))
@@ -435,19 +477,33 @@ class Store:
 
     # ------------------------------------------------------------------ sessions
 
-    async def get_session(self, conv_id: str, agent_id: str) -> tuple[str, int] | None:
+    async def get_session(self, conv_id: str, agent_id: str) -> SessionRow | None:
         row = await self.db.fetchone(
-            "SELECT session_id, seen_ord FROM session_map"
+            "SELECT session_id, seen_ord, directory FROM session_map"
             " WHERE conversation_id = ? AND agent_id = ?",
             (conv_id, agent_id),
         )
-        return (row["session_id"], int(row["seen_ord"])) if row else None
+        return (
+            SessionRow(row["session_id"], int(row["seen_ord"]), row["directory"]) if row else None
+        )
 
-    async def put_session(self, conv_id: str, agent_id: str, session_id: str) -> None:
+    async def usable_session(
+        self, conv_id: str, agent_id: str, directory: str | None
+    ) -> SessionRow | None:
+        """The mapped session if it was created for ``directory``; a session's directory is
+        immutable, so after a directory change the agent needs a new one."""
+        found = await self.get_session(conv_id, agent_id)
+        return found if found is not None and found.directory == directory else None
+
+    async def put_session(
+        self, conv_id: str, agent_id: str, session_id: str, directory: str | None
+    ) -> None:
+        """Map (conversation, agent) to a new session that has seen nothing yet."""
         await self.db.execute(
-            "INSERT OR IGNORE INTO session_map (conversation_id, agent_id, session_id)"
-            " VALUES (?, ?, ?)",
-            (conv_id, agent_id, session_id),
+            "INSERT INTO session_map (conversation_id, agent_id, session_id, seen_ord, directory)"
+            " VALUES (?, ?, ?, 0, ?) ON CONFLICT (conversation_id, agent_id) DO UPDATE SET"
+            " session_id = excluded.session_id, seen_ord = 0, directory = excluded.directory",
+            (conv_id, agent_id, session_id, directory),
         )
 
     @staticmethod

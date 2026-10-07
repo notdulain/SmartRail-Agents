@@ -68,6 +68,13 @@ def format_transcript(messages: Sequence[Message]) -> str:
     return "\n\n".join(reversed(kept))
 
 
+def with_history(transcript: str, text: str) -> str:
+    """Prefix a direct-chat turn with earlier messages for a session that has not seen them."""
+    if not transcript:
+        return text
+    return f"Earlier messages in this conversation:\n{transcript}\n\nNew message:\n{text}"
+
+
 def turn_text(task: str, topic: str, transcript: str) -> str:
     text = f"{task}\n\nTopic: {topic}"
     if transcript:
