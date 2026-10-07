@@ -1,4 +1,4 @@
-import type { ConversationDetail, ErrorCode, Message, RunEvent } from "../api/types";
+import type { ConversationDetail, ErrorCode, Message, RunEvent, ToolCall } from "../api/types";
 
 export type RunPhase = "idle" | "running" | "completed" | "failed" | "cancelled" | "paused";
 
@@ -32,6 +32,16 @@ function upsert(messages: Message[], message: Message): Message[] {
   if (i === -1) return [...messages, message];
   const next = messages.slice();
   next[i] = message;
+  return next;
+}
+
+/** Insert or replace a tool call by id, keeping call order. */
+export function upsertToolCall(calls: ToolCall[] | undefined, call: ToolCall): ToolCall[] {
+  const list = calls ?? [];
+  const i = list.findIndex((c) => c.id === call.id);
+  if (i === -1) return [...list, call];
+  const next = list.slice();
+  next[i] = call;
   return next;
 }
 
@@ -84,6 +94,16 @@ export function conversationReducer(
           if (i === -1) return base;
           const messages = state.messages.slice();
           messages[i] = { ...messages[i], content: messages[i].content + event.delta };
+          return { ...base, messages };
+        }
+        case "message.tool": {
+          const i = state.messages.findIndex((m) => m.id === event.message_id);
+          if (i === -1) return base;
+          const messages = state.messages.slice();
+          messages[i] = {
+            ...messages[i],
+            tool_calls: upsertToolCall(messages[i].tool_calls, event.tool_call),
+          };
           return { ...base, messages };
         }
         case "message.completed":

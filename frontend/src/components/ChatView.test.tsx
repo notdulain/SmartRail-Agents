@@ -12,6 +12,7 @@ import {
 } from "../test/fixtures";
 import { errorResponse, liveSse, mockFetch, sseResponse } from "../test/mockFetch";
 import { renderWithProviders } from "../test/render";
+import { fakeFileSearch } from "../test/fakeFiles";
 import { ChatView } from "./ChatView";
 
 type Ev = { seq: number; type: string; [k: string]: unknown };
@@ -114,6 +115,51 @@ describe("ChatView composer and Stop", () => {
     await waitFor(() => expect(composer()).toBeEnabled());
     expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
     expect(screen.getByText("Platform four")).toBeInTheDocument();
+  });
+
+  it("attaches files from participants with a working directory and sends them", async () => {
+    let loaded = 0;
+    const { api } = setup({
+      "GET /api/agents": () => [
+        makeAgent({ id: "agt_1", name: "Driver", working_directory: "C:\\work", tool_access: "read_only" }),
+        makeAgent({ id: "agt_2", name: "Guard" }),
+      ],
+      "GET /api/conversations/cnv_1": () => {
+        loaded++;
+        return loaded === 1
+          ? detail({
+              conversation: makeConversation({ type: "group", topic: "T", participant_ids: ["agt_1", "agt_2"] }),
+            })
+          : detail({
+              conversation: makeConversation({ type: "group", topic: "T", participant_ids: ["agt_1", "agt_2"] }),
+              messages: [
+                makeUserMessage({ content: "Read it", attachments: [{ agent_id: "agt_1", path: "README.md" }] }),
+              ],
+            });
+      },
+      "GET /api/agents/agt_1/files": fakeFileSearch(),
+      "POST /api/conversations/cnv_1/messages": () => ({ run_id: "run_1", user_message_id: "msg_user" }),
+      "GET /api/runs/run_1/events": () => sseResponse([runDone(1, "run.completed")]),
+    });
+    await screen.findByText(/Start with the topic/);
+    await userEvent.type(composer(), "@readme");
+    const option = await screen.findByRole("option", { name: /README\.md/ });
+    // Only the participant with a folder is searched; its group is labelled.
+    expect(screen.getByRole("group", { name: "Driver" })).toContainElement(option);
+    expect(screen.queryByRole("group", { name: "Guard" })).not.toBeInTheDocument();
+    await userEvent.keyboard("{Enter}");
+    await userEvent.type(composer(), "Read it{Enter}");
+    await waitFor(() =>
+      expect(api.calls.find((c) => c.method === "POST")?.body).toEqual({
+        content: "Read it",
+        attachments: [{ agent_id: "agt_1", path: "README.md" }],
+      }),
+    );
+    expect(api.calls.some((c) => c.path === "/api/agents/agt_2/files")).toBe(false);
+    const sent = await screen.findByRole("list", { name: "Attached files" });
+    expect(sent).toHaveTextContent("Driver");
+    expect(sent).toHaveTextContent("README.md");
+    expect(screen.queryByRole("list", { name: "Attachments" })).not.toBeInTheDocument();
   });
 
   it("does not send empty or whitespace-only messages", async () => {
@@ -256,6 +302,30 @@ describe("ChatView loading and resuming", () => {
     expect(screen.getAllByText("Hello")).toHaveLength(1);
     const resume = api.calls.filter((c) => c.path === "/api/runs/run_1/events")[1];
     expect(resume.url.searchParams.get("after")).toBe("2");
+  });
+
+  it("shows tool activity live from message.tool events", async () => {
+    const live = liveSse();
+    setup({
+      "GET /api/conversations/cnv_1": () =>
+        detail({ messages: [makeUserMessage()], active_run_id: "run_1" }),
+      "GET /api/runs/run_1/events": () => live.response,
+    });
+    await screen.findByRole("button", { name: "Stop" });
+    const tool = (seq: number, status: string): Ev => ({
+      ...base,
+      seq,
+      type: "message.tool",
+      message_id: "m1",
+      tool_call: { id: "t1", tool: "read", title: "README.md", status, error: null },
+    });
+    live.push(started(1));
+    live.push(tool(2, "running"));
+    expect(await screen.findByRole("button", { name: /Reading\s+README\.md/ })).toBeInTheDocument();
+    live.push(tool(3, "completed"));
+    live.push(delta(4, "Done reading"));
+    expect(await screen.findByRole("button", { name: /Used 1 tool/ })).toBeInTheDocument();
+    expect(screen.getByText("Done reading")).toBeInTheDocument();
   });
 
   it("shows a loading state and then the transcript", async () => {

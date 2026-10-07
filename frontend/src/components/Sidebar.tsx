@@ -1,12 +1,14 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import type { Agent, Conversation } from "../api/types";
 import { providerName } from "../lib/models";
+import { basename } from "../lib/paths";
 import { initials, speakerStyle } from "../lib/speakerColor";
 import { useAppData } from "../state/appData";
 import { Button } from "./ui/Button";
 import {
   ChatIcon,
   CloseIcon,
+  FolderIcon,
   PencilIcon,
   PlusIcon,
   SettingsIcon,
@@ -216,6 +218,10 @@ function AgentRow({
   onChat?(): void;
   onEdit(): void;
 }) {
+  const folderId = useId();
+  const folder = agent.working_directory ? (
+    <FolderBadge id={folderId} path={agent.working_directory} access={agent.tool_access} />
+  ) : null;
   const body = (
     <>
       <span
@@ -233,6 +239,7 @@ function AgentRow({
               Coordinator
             </span>
           ) : null}
+          {folder}
         </span>
         <span className="block truncate text-xs text-muted">{subtitle}</span>
       </span>
@@ -246,6 +253,7 @@ function AgentRow({
           onClick={onChat}
           title={`Chat with ${agent.name}`}
           aria-label={`Chat with ${agent.name}`}
+          aria-describedby={folder ? folderId : undefined}
           className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm"
         >
           {body}
@@ -266,3 +274,39 @@ function AgentRow({
   );
 }
 
+
+const ACCESS_LABEL: Record<Agent["tool_access"], string> = {
+  none: "no file access",
+  read_only: "read only",
+  read_write: "read & write",
+};
+
+/** Folder icon plus a short access tag; the full path is in the tooltip. */
+function FolderBadge({
+  id,
+  path,
+  access,
+}: {
+  id: string;
+  path: string;
+  access: Agent["tool_access"];
+}) {
+  const tone =
+    access === "read_write"
+      ? "bg-warn-soft text-warn"
+      : access === "read_only"
+        ? "bg-accent-soft text-accent"
+        : "bg-line/70 text-muted";
+  return (
+    <span
+      title={`Working directory: ${path}\nFile access: ${ACCESS_LABEL[access]}`}
+      className={`flex shrink-0 items-center gap-0.5 rounded-full px-1.5 text-[0.65rem] font-medium ${tone}`}
+    >
+      <FolderIcon width={11} height={11} />
+      {access === "read_write" ? "write" : access === "read_only" ? "read" : null}
+      <span id={id} className="sr-only">
+        Works in {basename(path)}, {ACCESS_LABEL[access]}
+      </span>
+    </span>
+  );
+}

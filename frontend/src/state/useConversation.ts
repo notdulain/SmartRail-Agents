@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { api, ApiError } from "../api/client";
 import { streamRun } from "../api/sse";
-import type { Conversation, RunEvent } from "../api/types";
+import type { Conversation, FileRef, RunEvent } from "../api/types";
 import { isApiCode } from "../lib/errors";
 import {
   conversationReducer,
@@ -23,7 +23,7 @@ export interface UseConversation {
   stopping: boolean;
   /** Inline message for a failed send (also surfaced by the caller as a toast). */
   sendError: ApiError | null;
-  send(content: string): Promise<boolean>;
+  send(content: string, attachments?: FileRef[]): Promise<boolean>;
   stop(): Promise<void>;
   reload(): Promise<void>;
 }
@@ -154,14 +154,14 @@ export function useConversation(id: string | null, options: Options = {}): UseCo
   }, [load]);
 
   const send = useCallback(
-    async (content: string): Promise<boolean> => {
+    async (content: string, attachments: FileRef[] = []): Promise<boolean> => {
       const convId = idRef.current;
       if (!convId || stateRef.current.activeRunId) return false;
       const gen = generation.current;
       setSending(true);
       setSendError(null);
       try {
-        const res = await api.sendMessage(convId, content);
+        const res = await api.sendMessage(convId, content, attachments);
         if (gen !== generation.current) return true;
         // Lock the composer right away; then load the transcript (now holding the user's message)
         // and stream the run from its start.

@@ -6,7 +6,7 @@ import { useAppData } from "../state/appData";
 import { pausedBanner } from "../state/conversationState";
 import { useToasts } from "../state/toast";
 import { useConversation } from "../state/useConversation";
-import { Composer } from "./Composer";
+import { Composer, type MentionSource } from "./Composer";
 import { ConversationMenu } from "./ConversationMenu";
 import { MessageList } from "./MessageList";
 import { hasCoordinator } from "./NewDiscussionDialog";
@@ -90,6 +90,11 @@ export function ChatView({
   const direct = conversation && conversation.type === "direct"
     ? agents.find((a) => a.id === conversation.participant_ids[0])
     : undefined;
+  // Participants whose working directory can be searched with @.
+  const mentionSources: MentionSource[] = (conversation?.participant_ids ?? []).flatMap((id) => {
+    const a = agents.find((x) => x.id === id);
+    return a?.working_directory ? [{ agentId: a.id, agentName: a.name }] : [];
+  });
   const placeholder = isGroup
     ? "Message the group. Each message starts one bounded round of discussion."
     : `Message ${direct?.name ?? "the agent"}`;
@@ -124,6 +129,9 @@ export function ChatView({
           ) : (
             <MessageList
               messages={state.messages}
+              attachmentAgentName={
+                isGroup ? (id) => agents.find((a) => a.id === id)?.name : undefined
+              }
               onEditAgent={(id) => {
                 const agent = agents.find((a) => a.id === id);
                 if (agent) onEditAgent(agent);
@@ -172,7 +180,10 @@ export function ChatView({
           </div>
 
           <Composer
+            key={conversationId}
             placeholder={placeholder}
+            mentionSources={mentionSources}
+            labelSources={isGroup}
             disabled={locked || !conversation}
             running={running}
             stopping={chat.stopping}

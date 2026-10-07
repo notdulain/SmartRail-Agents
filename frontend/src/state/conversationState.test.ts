@@ -135,3 +135,64 @@ describe("conversationReducer", () => {
     expect(pausedBanner(s)).toBeNull();
   });
 });
+
+describe("message.tool events", () => {
+  const tool = (seq: number, call: Record<string, unknown>, messageId = "m1") =>
+    run({
+      seq,
+      type: "message.tool",
+      message_id: messageId,
+      tool_call: { error: null, ...call },
+    });
+
+  it("appends new tool calls in order and updates existing ones by id", () => {
+    let s = apply(initialConversationState, { type: "attach", runId: "run_1" }, ev(started(1)));
+    s = apply(
+      s,
+      ev(tool(2, { id: "t1", tool: "read", title: "README.md", status: "running" })),
+      ev(tool(3, { id: "t2", tool: "grep", title: "TODO", status: "running" })),
+      ev(tool(4, { id: "t1", tool: "read", title: "README.md", status: "completed" })),
+      ev(tool(5, { id: "t2", tool: "grep", title: "TODO", status: "error", error: "bad pattern" })),
+    );
+    expect(s.messages[0].tool_calls).toEqual([
+      { id: "t1", tool: "read", title: "README.md", status: "completed", error: null },
+      { id: "t2", tool: "grep", title: "TODO", status: "error", error: "bad pattern" },
+    ]);
+  });
+
+  it("keeps streamed text when tool calls arrive", () => {
+    let s = apply(initialConversationState, { type: "attach", runId: "run_1" });
+    s = apply(
+      s,
+      ev(started(1)),
+      ev(delta(2, "Let me look")),
+      ev(tool(3, { id: "t1", tool: "list", title: "src", status: "running" })),
+      ev(delta(4, "...")),
+    );
+    expect(s.messages[0].content).toBe("Let me look...");
+    expect(s.messages[0].tool_calls).toHaveLength(1);
+  });
+
+  it("ignores tool events for unknown messages and replays idempotently", () => {
+    let s = apply(initialConversationState, { type: "attach", runId: "run_1" }, ev(started(1)));
+    s = apply(s, ev(tool(2, { id: "t1", tool: "read", title: "a", status: "running" }, "nope")));
+    expect(s.messages[0].tool_calls).toEqual([]);
+    expect(s.appliedSeq).toBe(2);
+
+    // Reattaching replays from seq 1: the call is rebuilt once, not duplicated.
+    const call = tool(3, { id: "t1", tool: "read", title: "a", status: "completed" });
+    s = apply(s, ev(call));
+    s = apply(s, { type: "attach", runId: "run_1" }, ev(started(1)), ev(tool(2, { id: "x", tool: "read", title: "b", status: "running" }, "nope")), ev(call));
+    expect(s.messages[0].tool_calls).toHaveLength(1);
+  });
+
+  it("tolerates a message without a tool_calls array", () => {
+    let s = apply(initialConversationState, { type: "attach", runId: "run_1" });
+    s = apply(
+      s,
+      ev(run({ seq: 1, type: "message.started", message: { ...makeMessage({ id: "m1" }), tool_calls: undefined } })),
+      ev(tool(2, { id: "t1", tool: "read", title: "a", status: "running" })),
+    );
+    expect(s.messages[0].tool_calls).toHaveLength(1);
+  });
+});
