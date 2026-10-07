@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   makeAgent,
   makeConversation,
@@ -76,6 +76,8 @@ function setup(routes: Record<string, (r: never) => unknown> = {}, props: object
 }
 
 const composer = () => screen.getByLabelText("Message");
+
+beforeEach(() => localStorage.clear());
 
 describe("ChatView composer and Stop", () => {
   it("sends on Enter, keeps Shift+Enter as a newline, then streams the reply live", async () => {

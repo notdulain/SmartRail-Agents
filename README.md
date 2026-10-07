@@ -43,7 +43,9 @@ opencode auth login        # choose OpenAI → ChatGPT sign-in for the GPT-6-sol
    Each send runs one bounded exchange; **Stop** cancels it. Type `@` in the composer to attach
    files from a participant's working directory; their text is sent with your message. Paste a
    PNG, JPEG, GIF, or WebP image into the composer to send it with your message. Tool
-   calls an agent makes (files read, edited, searched) are listed above its reply.
+   calls an agent makes (files read, edited, searched) are listed above its reply. Copy an
+   agent reply with its **Copy** button. Unsent text is saved per conversation, and the sidebar
+   search finds discussions by title or topic.
 4. Conversation menu → **Export transcript** writes Markdown only when you ask.
 
 ### Options (environment variables)

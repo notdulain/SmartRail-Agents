@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { Agent, Conversation } from "../api/types";
 import { providerName } from "../lib/models";
 import { basename } from "../lib/paths";
@@ -40,9 +40,15 @@ export function Sidebar({
 }: Props) {
   const { agents, conversations, providers, loaded, settings } = useAppData();
   const closeRef = useRef<HTMLButtonElement>(null);
+  const [discussionSearch, setDiscussionSearch] = useState("");
   const active = agents.filter((a) => !a.archived);
   const archived = agents.filter((a) => a.archived);
-  const sorted = [...conversations].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  const query = discussionSearch.trim().toLocaleLowerCase();
+  const sorted = [...conversations]
+    .filter((c) =>
+      !query || c.title.toLocaleLowerCase().includes(query) || c.topic?.toLocaleLowerCase().includes(query),
+    )
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
 
   useEffect(() => {
     if (open && window.matchMedia?.("(max-width: 767px)").matches) closeRef.current?.focus();
@@ -99,10 +105,32 @@ export function Sidebar({
             <h2 id="sb-discussions" className="px-2 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-muted">
               Discussions
             </h2>
+            <div className="relative mx-2 mb-2">
+              <input
+                type="search"
+                aria-label="Search discussions"
+                placeholder="Search discussions"
+                value={discussionSearch}
+                onChange={(event) => setDiscussionSearch(event.target.value)}
+                className="w-full rounded-lg border border-line bg-surface px-3 py-1.5 pr-8 text-sm text-fg outline-none placeholder:text-muted focus:border-accent"
+              />
+              {discussionSearch ? (
+                <button
+                  type="button"
+                  aria-label="Clear discussion search"
+                  onClick={() => setDiscussionSearch("")}
+                  className="absolute inset-y-0 right-1 flex items-center rounded-lg px-1.5 text-muted hover:text-fg"
+                >
+                  <CloseIcon width={14} height={14} />
+                </button>
+              ) : null}
+            </div>
             {!loaded ? (
               <p className="px-2 py-1 text-sm text-muted">Loading…</p>
-            ) : sorted.length === 0 ? (
+            ) : conversations.length === 0 ? (
               <p className="px-2 py-1 text-sm text-muted">No discussions yet.</p>
+            ) : sorted.length === 0 ? (
+              <p className="px-2 py-1 text-sm text-muted" role="status">No matching discussions.</p>
             ) : (
               <ul className="space-y-0.5">
                 {sorted.map((c) => (

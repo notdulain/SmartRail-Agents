@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { makeMessage, makeUserMessage } from "../test/fixtures";
@@ -59,6 +59,42 @@ describe("MessageList", () => {
   it("shows a waiting indicator before the first delta", () => {
     render(<MessageList messages={[makeMessage({ status: "streaming", content: "" })]} />);
     expect(screen.getByLabelText("Waiting for the first words")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy response" })).not.toBeInTheDocument();
+  });
+
+  it.each(["complete", "streaming", "failed", "cancelled"] as const)(
+    "copies raw %s response text, including partial responses",
+    async (status) => {
+      const user = userEvent.setup();
+      const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+      const content = "First line\n  Second line  ";
+      render(<MessageList messages={[makeMessage({ status, content })]} />);
+
+      await user.click(screen.getByRole("button", { name: "Copy response" }));
+      expect(writeText).toHaveBeenCalledExactlyOnceWith(content);
+      expect(screen.getByRole("button", { name: "Copied response" })).toHaveTextContent("Copied");
+      writeText.mockRestore();
+    },
+  );
+
+  it("offers no copy action for an empty failed response", () => {
+    render(<MessageList messages={[makeMessage({ status: "failed", content: "", error: "Oops" })]} />);
+    expect(screen.queryByRole("button", { name: /copy/i })).not.toBeInTheDocument();
+  });
+
+  it("reports clipboard failure and allows another attempt", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText")
+      .mockRejectedValueOnce(new Error("Clipboard unavailable"))
+      .mockResolvedValueOnce();
+    render(<MessageList messages={[makeMessage({ content: "Keep this" })]} />);
+
+    await user.click(screen.getByRole("button", { name: "Copy response" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Copy failed; try again" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Copy failed; try again" }));
+    expect(writeText).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "Copied response" })).toBeInTheDocument();
+    writeText.mockRestore();
   });
 
   it("shows stage labels once per stage and reply targets for group discussions", () => {
