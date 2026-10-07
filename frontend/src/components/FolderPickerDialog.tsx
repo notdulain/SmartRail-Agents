@@ -240,7 +240,11 @@ export function FolderPickerDialog({ open, initialPath, onSelect, onClose }: Pro
               Loading folders…
             </div>
           ) : null}
-          {listing && listing.entries.length === 0 ? (
+          {!listing && !loading ? (
+            <p className="p-4 text-sm text-muted">
+              No folder to show. Type a path above and press Go.
+            </p>
+          ) : listing && listing.entries.length === 0 ? (
             <p className="p-4 text-sm text-muted">No sub-folders here.</p>
           ) : listing ? (
             <ul

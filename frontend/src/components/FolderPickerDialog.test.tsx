@@ -97,6 +97,16 @@ describe("FolderPickerDialog", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Cannot open C:\\Gone");
   });
 
+  it("explains when nothing can be listed at all", async () => {
+    mockFetch({
+      "GET /api/fs/directories": () => new Response("boom", { status: 500 }),
+    });
+    render(<FolderPickerDialog open onSelect={vi.fn()} onClose={vi.fn()} />);
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(await screen.findByText(/No folder to show/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Select this folder" })).toBeDisabled();
+  });
+
   it("moves through folders with the keyboard", async () => {
     setup();
     await waitFor(() => expect(current()).toHaveTextContent("me"));
