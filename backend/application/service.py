@@ -15,6 +15,7 @@ from backend.contracts.models import (
     ConversationType,
     DirectoryListing,
     ErrorCode,
+    FileSearchResponse,
     ProvidersResponse,
     Run,
     SendMessageRequest,
@@ -28,7 +29,13 @@ from backend.contracts.runtime import OpenCodeRuntime, RuntimeUnavailableError
 from .db import Database
 from .errors import AppError, invalid, not_found
 from .export import render_markdown
-from .files import FileProblem, list_directories, normalize_directory
+from .files import (
+    FileProblem,
+    directory_exists,
+    list_directories,
+    normalize_directory,
+    search_files,
+)
 from .runs import RunManager
 from .store import Store, snapshot_of
 from .util import new_id, utcnow
@@ -182,6 +189,27 @@ class Service:
             return await asyncio.to_thread(list_directories, path)
         except FileProblem as exc:
             raise invalid(str(exc)) from None
+
+    async def search_agent_files(self, agent_id: str, q: str, limit: int) -> FileSearchResponse:
+        agent = await self.store.get_agent(agent_id)
+        if agent is None:
+            raise not_found("Agent", agent_id)
+        root = await self._existing_directory(agent)
+        files, truncated = await asyncio.to_thread(search_files, root, q, limit)
+        return FileSearchResponse(root=root, files=files, truncated=truncated)
+
+    async def _existing_directory(self, agent: Agent) -> str:
+        """The agent's working directory, or a 422 naming the problem."""
+        root = agent.working_directory
+        if not root:
+            raise invalid(f"Agent {agent.name!r} has no working directory.", agent.id)
+        if not await asyncio.to_thread(directory_exists, root):
+            raise invalid(
+                f"The working directory of agent {agent.name!r} no longer exists: {root}. "
+                "Edit the agent to choose another one.",
+                agent.id,
+            )
+        return root
 
     # ------------------------------------------------------------------ conversations
 

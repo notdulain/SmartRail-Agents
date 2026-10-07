@@ -18,6 +18,7 @@ from backend.contracts.models import (
     ConversationCreate,
     ConversationDetail,
     DirectoryListing,
+    FileSearchResponse,
     HealthResponse,
     ProvidersResponse,
     Run,
@@ -69,6 +70,20 @@ async def create_agent(body: AgentCreate, svc: Service = Svc):
 @router.patch("/agents/{agent_id}", response_model=Agent, responses=ERRORS)
 async def update_agent(agent_id: str, body: AgentUpdate, svc: Service = Svc):
     return await svc.update_agent(agent_id, body)
+
+
+@router.get("/agents/{agent_id}/files", response_model=FileSearchResponse, responses=ERRORS)
+async def search_agent_files(
+    agent_id: str,
+    q: str = Query(default="", max_length=200),
+    limit: int = Query(default=50, ge=1, le=200),
+    svc: Service = Svc,
+):
+    """Files (and directories) in the agent's working directory whose relative path matches
+    ``q`` (case-insensitive subsequence; empty ``q`` lists recently modified files first).
+    Skips VCS/dependency/build folders. 422 ``validation_error`` if the agent has no working
+    directory or it no longer exists."""
+    return await svc.search_agent_files(agent_id, q, limit)
 
 
 @router.get("/fs/directories", response_model=DirectoryListing, responses=ERRORS)

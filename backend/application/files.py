@@ -11,11 +11,57 @@ import os
 import stat
 import string
 import sys
+import time
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 
-from backend.contracts.models import DirectoryEntry, DirectoryListing
+from backend.contracts.models import DirectoryEntry, DirectoryListing, FileEntry
 
 MAX_DIRECTORY_ENTRIES = 1000
+
+# File search walks at most this many entries / seconds per request, breadth first.
+MAX_WALK_ENTRIES = 20_000
+WALK_SECONDS = 2.0
+
+# Version control, dependency, virtualenv, cache and build output folders.
+IGNORED_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".bzr",
+        ".worktrees",
+        "node_modules",
+        "bower_components",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".nox",
+        ".eggs",
+        "dist",
+        "build",
+        "target",
+        ".next",
+        ".nuxt",
+        ".svelte-kit",
+        ".turbo",
+        ".parcel-cache",
+        ".cache",
+        ".gradle",
+        ".terraform",
+        ".idea",
+        "coverage",
+        "htmlcov",
+        "Pods",
+        "DerivedData",
+    }
+)
+IGNORED_FILES = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
 
 
 class FileProblem(ValueError):
@@ -110,6 +156,130 @@ def list_directories(raw: str | None) -> DirectoryListing:
         home=home_directory(),
         roots=filesystem_roots(),
     )
+
+
+# ----------------------------------------------------------------------- file search
+
+
+@dataclass(frozen=True)
+class _Found:
+    path: str  # relative, "/" separators
+    is_dir: bool
+    size: int | None
+    mtime: float
+
+
+def is_inside(path: Path, root: Path) -> bool:
+    """Containment for resolved paths (case-insensitive on Windows, like the filesystem)."""
+    return path == root or root in path.parents
+
+
+def _walk(root: Path) -> tuple[list[_Found], bool]:
+    """Breadth-first listing of ``root`` without following links out of it (or into loops).
+
+    Links (symlinks, junctions) that resolve inside the root are listed but never descended
+    into; links that resolve outside it are skipped. Returns (entries, truncated).
+    """
+    deadline = time.monotonic() + WALK_SECONDS
+    found: list[_Found] = []
+    queue: deque[tuple[str, str]] = deque([(str(root), "")])
+    visited = 0
+    while queue:
+        directory, prefix = queue.popleft()
+        try:
+            with os.scandir(directory) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if visited >= MAX_WALK_ENTRIES or time.monotonic() > deadline:
+                return found, True
+            visited += 1
+            name = entry.name
+            try:
+                if _is_link(entry):
+                    target = Path(entry.path).resolve(strict=True)
+                    if not is_inside(target, root):
+                        continue
+                    info = target.stat()
+                    is_dir, descend = stat.S_ISDIR(info.st_mode), False
+                else:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    info = entry.stat(follow_symlinks=False)
+                    descend = is_dir
+            except (OSError, RuntimeError):  # RuntimeError: symlink loop on older Pythons
+                continue
+            rel = prefix + name
+            if is_dir:
+                if name in IGNORED_DIRS:
+                    continue
+                found.append(_Found(rel, True, None, info.st_mtime))
+                if descend:
+                    queue.append((entry.path, rel + "/"))
+            elif name not in IGNORED_FILES:
+                found.append(_Found(rel, False, info.st_size, info.st_mtime))
+    return found, False
+
+
+def _span(query: str, text: str) -> int | None:
+    """Length of the tightest window of ``text`` containing ``query`` as a subsequence."""
+    best: int | None = None
+    start = text.find(query[0])
+    while start != -1:
+        pos = start
+        for ch in query[1:]:
+            pos = text.find(ch, pos + 1)
+            if pos == -1:
+                return best
+        width = pos - start + 1
+        if best is None or width < best:
+            best = width
+        start = text.find(query[0], start + 1)
+    return best
+
+
+def match_rank(query: str, path: str) -> tuple[int, int, int, str] | None:
+    """Sort key for ``path`` against a lower-case ``query``; ``None`` if it does not match.
+
+    Tiers: exact file name, name prefix, name substring, path substring, name subsequence,
+    path subsequence. Within a tier, tighter subsequence matches and shorter paths first.
+    """
+    lowered = path.lower()
+    name = lowered.rsplit("/", 1)[-1]
+    if name == query:
+        tier, spread = 0, 0
+    elif name.startswith(query):
+        tier, spread = 1, 0
+    elif query in name:
+        tier, spread = 2, 0
+    elif query in lowered:
+        tier, spread = 3, 0
+    elif (width := _span(query, name)) is not None:
+        tier, spread = 4, width - len(query)
+    elif (width := _span(query, lowered)) is not None:
+        tier, spread = 5, width - len(query)
+    else:
+        return None
+    return tier, spread, len(path), lowered
+
+
+def search_files(root: str, query: str, limit: int) -> tuple[list[FileEntry], bool]:
+    """Matches for ``query`` under ``root`` (see :func:`match_rank`); empty query: files by
+    most recent modification. Returns (entries, truncated)."""
+    root_path = Path(root).resolve()
+    found, truncated = _walk(root_path)
+    needle = "".join(query.split()).lower().replace("\\", "/")
+    if needle:
+        ranked = [(key, f) for f in found if (key := match_rank(needle, f.path)) is not None]
+        ranked.sort(key=lambda item: item[0])
+        matches = [f for _, f in ranked]
+    else:
+        matches = sorted((f for f in found if not f.is_dir), key=lambda f: (-f.mtime, f.path))
+    if len(matches) > limit:
+        truncated = True
+    return [
+        FileEntry(path=f.path, is_dir=f.is_dir, size=f.size) for f in matches[:limit]
+    ], truncated
 
 
 def _reason(exc: OSError) -> str:
