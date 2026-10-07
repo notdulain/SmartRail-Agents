@@ -107,6 +107,7 @@ describe("AgentEditorDialog", () => {
       persona: AGENT_TEMPLATES.find((t) => t.id === "driver")!.persona,
       provider_id: "openrouter",
       model_id: "deepseek/deepseek-chat",
+      tool_access: "none",
     });
   });
 

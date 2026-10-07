@@ -5,7 +5,10 @@ import type {
   Conversation,
   ConversationCreate,
   ConversationDetail,
+  DirectoryListing,
   ErrorCode,
+  FileRef,
+  FileSearchResponse,
   ProvidersResponse,
   Run,
   SendMessageResponse,
@@ -69,11 +72,24 @@ export interface ApiClient {
   listConversations(): Promise<Conversation[]>;
   createConversation(body: ConversationCreate): Promise<Conversation>;
   getConversation(id: string): Promise<ConversationDetail>;
-  sendMessage(conversationId: string, content: string): Promise<SendMessageResponse>;
+  sendMessage(
+    conversationId: string,
+    content: string,
+    attachments?: FileRef[],
+  ): Promise<SendMessageResponse>;
   stopRun(runId: string): Promise<Run>;
   getSettings(): Promise<Settings>;
   updateSettings(body: SettingsUpdate): Promise<Settings>;
   exportConversation(id: string): Promise<{ filename: string; blob: Blob }>;
+  /** Sub-directories of `path` (default: the user's home), for the working-directory picker. */
+  listDirectories(path?: string, signal?: AbortSignal): Promise<DirectoryListing>;
+  /** Files in an agent's working directory matching `q`, for `@` mentions. */
+  searchAgentFiles(
+    agentId: string,
+    q: string,
+    limit?: number,
+    signal?: AbortSignal,
+  ): Promise<FileSearchResponse>;
 }
 
 export function createApiClient(fetchImpl: FetchLike = (...a) => fetch(...a)): ApiClient {
@@ -108,8 +124,11 @@ export function createApiClient(fetchImpl: FetchLike = (...a) => fetch(...a)): A
     listConversations: () => request("/conversations"),
     createConversation: (b) => request("/conversations", json("POST", b)),
     getConversation: (id) => request(`/conversations/${encodeURIComponent(id)}`),
-    sendMessage: (id, content) =>
-      request(`/conversations/${encodeURIComponent(id)}/messages`, json("POST", { content })),
+    sendMessage: (id, content, attachments = []) =>
+      request(
+        `/conversations/${encodeURIComponent(id)}/messages`,
+        json("POST", attachments.length > 0 ? { content, attachments } : { content }),
+      ),
     stopRun: (id) => request(`/runs/${encodeURIComponent(id)}/stop`, { method: "POST" }),
     getSettings: () => request("/settings"),
     updateSettings: (b) => request("/settings", json("PATCH", b)),
@@ -125,6 +144,13 @@ export function createApiClient(fetchImpl: FetchLike = (...a) => fetch(...a)): A
       const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
       const filename = match ? decodeURIComponent(match[1]) : "transcript.md";
       return { filename, blob: await res.blob() };
+    },
+    listDirectories: (path, signal) =>
+      request(`/fs/directories${path ? `?${new URLSearchParams({ path })}` : ""}`, { signal }),
+    searchAgentFiles: (agentId, q, limit, signal) => {
+      const params = new URLSearchParams({ q });
+      if (limit !== undefined) params.set("limit", String(limit));
+      return request(`/agents/${encodeURIComponent(agentId)}/files?${params}`, { signal });
     },
   };
 }
