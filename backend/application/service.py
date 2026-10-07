@@ -2,31 +2,52 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from backend.config import AppConfig
 from backend.contracts.models import (
     Agent,
     AgentCreate,
+    AgentSnapshot,
     AgentUpdate,
     Conversation,
     ConversationCreate,
     ConversationDetail,
     ConversationType,
+    DirectoryListing,
     ErrorCode,
+    FileRef,
+    FileSearchResponse,
     ProvidersResponse,
     Run,
     SendMessageRequest,
     SendMessageResponse,
     Settings,
     SettingsUpdate,
+    ToolAccess,
 )
 from backend.contracts.runtime import OpenCodeRuntime, RuntimeUnavailableError
 
+from . import prompts
 from .db import Database
 from .errors import AppError, invalid, not_found
 from .export import render_markdown
+from .files import (
+    MAX_ATTACHMENTS_TOTAL_BYTES,
+    FileProblem,
+    directory_exists,
+    list_directories,
+    normalize_directory,
+    read_attachment,
+    search_files,
+)
 from .runs import RunManager
 from .store import Store, snapshot_of
 from .util import new_id, utcnow
+
+_NEEDS_DIRECTORY = (
+    "File tools need a working directory. Choose a working directory or set tool access to none."
+)
 
 
 class Service:
@@ -95,7 +116,18 @@ class Service:
     async def list_agents(self, include_archived: bool) -> list[Agent]:
         return await self.store.list_agents(include_archived)
 
+    async def _working_directory(self, raw: str, agent_id: str | None = None) -> str:
+        try:
+            return await asyncio.to_thread(normalize_directory, raw)
+        except FileProblem as exc:
+            raise invalid(str(exc), agent_id) from None
+
     async def create_agent(self, body: AgentCreate) -> Agent:
+        directory = None
+        if body.working_directory is not None and body.working_directory.strip():
+            directory = await self._working_directory(body.working_directory)
+        if body.tool_access is not ToolAccess.NONE and directory is None:
+            raise invalid(_NEEDS_DIRECTORY)
         await self._validate_model(body.provider_id, body.model_id)
         now = utcnow()
         agent = Agent(
@@ -104,6 +136,8 @@ class Service:
             persona=body.persona,
             provider_id=body.provider_id,
             model_id=body.model_id,
+            working_directory=directory,
+            tool_access=body.tool_access,
             revision=1,
             archived=False,
             created_at=now,
@@ -124,6 +158,16 @@ class Service:
             if not changes["name"]:
                 raise invalid("name must not be blank", agent_id)
         archived = changes.pop("archived", None)
+        if "working_directory" in changes:
+            raw = changes["working_directory"]
+            # "" clears the directory; anything else must be an existing directory.
+            changes["working_directory"] = (
+                await self._working_directory(raw, agent_id) if raw.strip() else None
+            )
+        directory = changes.get("working_directory", agent.working_directory)
+        access = changes.get("tool_access", agent.tool_access)
+        if access is not ToolAccess.NONE and directory is None:
+            raise invalid(_NEEDS_DIRECTORY, agent_id)
 
         edited = {k: v for k, v in changes.items() if getattr(agent, k) != v}
         if "provider_id" in changes or "model_id" in changes:
@@ -142,6 +186,35 @@ class Service:
             agent = agent.model_copy(update=update)
             await self.store.save_agent(agent)
         return agent
+
+    # ------------------------------------------------------------------ filesystem
+
+    async def list_directories(self, path: str | None) -> DirectoryListing:
+        try:
+            return await asyncio.to_thread(list_directories, path)
+        except FileProblem as exc:
+            raise invalid(str(exc)) from None
+
+    async def search_agent_files(self, agent_id: str, q: str, limit: int) -> FileSearchResponse:
+        agent = await self.store.get_agent(agent_id)
+        if agent is None:
+            raise not_found("Agent", agent_id)
+        root = await self._existing_directory(agent)
+        files, truncated = await asyncio.to_thread(search_files, root, q, limit)
+        return FileSearchResponse(root=root, files=files, truncated=truncated)
+
+    async def _existing_directory(self, agent: Agent) -> str:
+        """The agent's working directory, or a 422 naming the problem."""
+        root = agent.working_directory
+        if not root:
+            raise invalid(f"Agent {agent.name!r} has no working directory.", agent.id)
+        if not await asyncio.to_thread(directory_exists, root):
+            raise invalid(
+                f"The working directory of agent {agent.name!r} no longer exists: {root}. "
+                "Edit the agent to choose another one.",
+                agent.id,
+            )
+        return root
 
     # ------------------------------------------------------------------ conversations
 
@@ -220,6 +293,8 @@ class Service:
         coordinator = None
         if conv.type is ConversationType.GROUP:
             coordinator = await self._coordinator(settings)
+        await self._check_directories([*snapshots, *([coordinator] if coordinator else [])])
+        refs, attachments_text = await self._read_attachments(conv, agents, body.attachments)
 
         run, user_message = await self.runs.start_run(
             conv,
@@ -229,8 +304,63 @@ class Service:
             brief=settings.project_brief,
             participant_max_tokens=settings.participant_max_tokens,
             coordinator_max_tokens=settings.coordinator_max_tokens,
+            attachments=refs,
+            attachments_text=attachments_text,
         )
         return SendMessageResponse(run_id=run.id, user_message_id=user_message.id)
+
+    async def _check_directories(self, speakers: list[AgentSnapshot]) -> None:
+        for speaker in speakers:
+            root = speaker.working_directory
+            if root and not await asyncio.to_thread(directory_exists, root):
+                raise invalid(
+                    f"The working directory of agent {speaker.name!r} no longer exists: {root}. "
+                    "Edit the agent to choose another one.",
+                    speaker.agent_id,
+                )
+
+    async def _read_attachments(
+        self, conv: Conversation, agents: dict[str, Agent], wanted: list[FileRef]
+    ) -> tuple[list[FileRef], str | None]:
+        """Read attached files once, now; return the refs and their rendering for the model."""
+        refs: list[FileRef] = []
+        files: list[tuple[str, str | None, str]] = []
+        total = 0
+        for ref in wanted:
+            agent = agents.get(ref.agent_id)
+            if agent is None or ref.agent_id not in conv.participant_ids:
+                raise invalid(
+                    f"Cannot attach {ref.path!r}: agent {ref.agent_id!r} is not a participant "
+                    "of this conversation."
+                )
+            if not agent.working_directory:
+                raise invalid(
+                    f"Cannot attach {ref.path!r}: agent {agent.name!r} has no working directory.",
+                    agent.id,
+                )
+            try:
+                path, text, size = await asyncio.to_thread(
+                    read_attachment, agent.working_directory, ref.path
+                )
+            except FileProblem as exc:
+                raise invalid(
+                    f"Cannot attach {ref.path!r} from {agent.name}'s working directory: {exc}.",
+                    agent.id,
+                ) from None
+            clean = FileRef(agent_id=agent.id, path=path)
+            if clean in refs:
+                continue  # the same file twice is attached once
+            total += size
+            if total > MAX_ATTACHMENTS_TOTAL_BYTES:
+                raise invalid(
+                    f"Cannot attach {ref.path!r}: attached files may not exceed "
+                    f"{MAX_ATTACHMENTS_TOTAL_BYTES // 1024} KB in total.",
+                    agent.id,
+                )
+            refs.append(clean)
+            owner = agent.name if conv.type is ConversationType.GROUP else None
+            files.append((path, owner, text))
+        return refs, (prompts.render_attachments(files) if files else None)
 
     async def _coordinator(self, settings: Settings):
         coord_id = settings.coordinator_agent_id
@@ -305,9 +435,9 @@ class Service:
         for msg in messages:
             if msg.agent is not None:
                 spoken.setdefault(msg.agent.agent_id, msg.agent.name)
-        participants = [
-            spoken.get(a) or agents[a].name
+        names = {
+            a: spoken.get(a) or agents[a].name
             for a in conv.participant_ids
             if a in spoken or a in agents
-        ]
-        return render_markdown(conv, messages, participants)
+        }
+        return render_markdown(conv, messages, list(names.values()), names)

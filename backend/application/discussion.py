@@ -75,9 +75,15 @@ class DiscussionDriver:
         speaker = turn.speaker
         coordinating = turn.stage in (0, 3)
 
-        found = await store.get_session(conversation.id, speaker.agent_id)
-        unseen = await store.messages_after(conversation.id, found[1] if found else 0)
-        transcript = prompts.format_transcript([m for _, m in unseen])
+        # A missing or outdated session (the agent's directory changed) has seen nothing.
+        found = await store.usable_session(
+            conversation.id, speaker.agent_id, speaker.working_directory
+        )
+        unseen = await store.messages_after(conversation.id, found.seen_ord if found else 0)
+        messages = [m for _, m in unseen]
+        files = await store.attachment_texts([m.id for m in messages if m.attachments])
+        keep = {active.user_message.id} if active.user_message else set()
+        transcript = prompts.format_transcript(messages, files, keep)
 
         reply_to_id: str | None = None
         if turn.stage == 0:
@@ -95,6 +101,7 @@ class DiscussionDriver:
             speaker.persona,
             active.brief,
             prompts.group_framing(speaker.name, names, topic, coordinator=coordinating),
+            prompts.tools_text(speaker),
         )
         outcome = await self.manager.run_turn(
             active,

@@ -210,7 +210,7 @@ async def test_runtime_unreachable_fails_the_run(env):
     ada = await env.agent("Ada")
     conv = await env.direct(ada["id"])
 
-    async def boom(title):
+    async def boom(title, directory=None):
         raise RuntimeUnavailableError("connection refused")
 
     env.runtime.create_session = boom

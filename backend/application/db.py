@@ -14,7 +14,7 @@ from typing import Any
 
 import aiosqlite
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_V1 = """
 CREATE TABLE agents (
@@ -117,8 +117,24 @@ CREATE TABLE openrouter_spend (
 );
 """
 
+# v2: agent working directories and file tools, message attachments and tool calls, and the
+# directory each OpenCode session was created with (a session's directory is immutable, so a
+# changed agent directory means a new session).
+_SCHEMA_V2 = """
+ALTER TABLE agents ADD COLUMN working_directory TEXT;
+ALTER TABLE agents ADD COLUMN tool_access TEXT NOT NULL DEFAULT 'none';
+
+-- ``attachments_json``: FileRef list (user messages). ``attachments_text``: the rendered file
+-- contents exactly as sent to the model at send time. ``tool_calls_json``: ToolCall list.
+ALTER TABLE messages ADD COLUMN attachments_json TEXT;
+ALTER TABLE messages ADD COLUMN attachments_text TEXT;
+ALTER TABLE messages ADD COLUMN tool_calls_json TEXT;
+
+ALTER TABLE session_map ADD COLUMN directory TEXT;
+"""
+
 # version -> script upgrading from (version - 1). Append new entries; never edit old ones.
-_MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1}
+_MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2}
 
 Statement = tuple[str, Sequence[Any]]
 

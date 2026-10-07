@@ -110,3 +110,66 @@ async def test_interrupted_runs_are_failed_on_startup_without_new_requests(tmp_p
         assert runtime.requests == []
         # The slot is free: new runs work.
         assert (await second.run_to_end(conv, "go on"))["status"] == "completed"
+
+
+def _v1_database(path) -> None:
+    """A database exactly as schema v1 left it, with one agent, chat, run and session."""
+    from backend.application.db import _SCHEMA_V1
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(f"BEGIN;\n{_SCHEMA_V1}\nPRAGMA user_version = 1;\nCOMMIT;")
+        t = "2026-01-01T00:00:00+00:00"
+        con.execute(
+            "INSERT INTO agents VALUES ('agt_old', 'Old', 'persona', 'openai', 'gpt-6-sol',"
+            " 3, 0, ?, ?)",
+            (t, t),
+        )
+        con.execute(
+            "INSERT INTO conversations VALUES ('cnv_old', 'direct', 'Old', NULL, ?, ?)", (t, t)
+        )
+        con.execute("INSERT INTO participants VALUES ('cnv_old', 'agt_old', 0)")
+        con.execute(
+            "INSERT INTO runs (id, conversation_id, status, participants_json, created_at,"
+            " finished_at) VALUES ('run_old', 'cnv_old', 'completed', '[]', ?, ?)",
+            (t, t),
+        )
+        con.execute(
+            "INSERT INTO messages (id, conversation_id, run_id, role, speaker_name, content,"
+            " status, created_at) VALUES ('msg_old', 'cnv_old', 'run_old', 'user', 'You',"
+            " 'old text', 'complete', ?)",
+            (t,),
+        )
+        con.execute("INSERT INTO session_map VALUES ('cnv_old', 'agt_old', 'ses_old', 1)")
+        con.execute(
+            "INSERT INTO settings (id, openrouter_monthly_budget_usd, participant_max_tokens,"
+            " coordinator_max_tokens) VALUES (1, 5.0, 1024, 2048)"
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+async def test_v1_database_upgrades_with_data_intact(tmp_path):
+    data = tmp_path / "data"
+    db_path = AppConfig(data_dir=data).db_path
+    _v1_database(db_path)
+    runtime = fresh_runtime()
+    async with running_app(data, runtime) as env:
+        (agent,) = (await env.client.get("/api/agents")).json()
+        assert agent["id"] == "agt_old" and agent["revision"] == 3
+        assert agent["working_directory"] is None and agent["tool_access"] == "none"
+        (msg,) = await env.messages("cnv_old")
+        assert msg["content"] == "old text"
+        assert msg["attachments"] == [] and msg["tool_calls"] == []
+        # The pre-v2 session (no directory) is still reused for an agent without a directory.
+        await env.run_to_end("cnv_old", "again")
+        assert runtime.requests[0].session_id == "ses_old"
+    con = sqlite3.connect(db_path)
+    try:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
+        cols = {r[1] for r in con.execute("PRAGMA table_info(session_map)")}
+        assert "directory" in cols
+    finally:
+        con.close()

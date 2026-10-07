@@ -17,6 +17,8 @@ from backend.contracts.models import (
     Conversation,
     ConversationCreate,
     ConversationDetail,
+    DirectoryListing,
+    FileSearchResponse,
     HealthResponse,
     ProvidersResponse,
     Run,
@@ -70,6 +72,29 @@ async def update_agent(agent_id: str, body: AgentUpdate, svc: Service = Svc):
     return await svc.update_agent(agent_id, body)
 
 
+@router.get("/agents/{agent_id}/files", response_model=FileSearchResponse, responses=ERRORS)
+async def search_agent_files(
+    agent_id: str,
+    q: str = Query(default="", max_length=200),
+    limit: int = Query(default=50, ge=1, le=200),
+    svc: Service = Svc,
+):
+    """Files (and directories) in the agent's working directory whose relative path matches
+    ``q`` (case-insensitive subsequence; empty ``q`` lists recently modified files first).
+    Skips VCS/dependency/build folders. 422 ``validation_error`` if the agent has no working
+    directory or it no longer exists."""
+    return await svc.search_agent_files(agent_id, q, limit)
+
+
+@router.get("/fs/directories", response_model=DirectoryListing, responses=ERRORS)
+async def list_directories(
+    path: str | None = Query(default=None, max_length=1024), svc: Service = Svc
+):
+    """Sub-directories of ``path`` (default: the user's home) for the working-directory
+    picker. 422 ``validation_error`` if ``path`` is not an existing directory."""
+    return await svc.list_directories(path)
+
+
 @router.get("/providers", response_model=ProvidersResponse)
 async def get_providers(refresh: bool = False, svc: Service = Svc):
     """Provider/model catalog from OpenCode. ``refresh=true`` re-queries OpenCode."""
@@ -99,7 +124,10 @@ async def get_conversation(conversation_id: str, svc: Service = Svc):
 )
 async def send_message(conversation_id: str, body: SendMessageRequest, svc: Service = Svc):
     """Store the user message and start a run (one agent turn for direct chats; one bounded
-    two-round exchange for group discussions). 409 ``run_active`` if a run is in progress."""
+    two-round exchange for group discussions). 409 ``run_active`` if a run is in progress.
+    Attached files are read now and their text is sent with the message; 422
+    ``validation_error`` if one is missing, outside the working directory, binary or too
+    large."""
     return await svc.send_message(conversation_id, body)
 
 
