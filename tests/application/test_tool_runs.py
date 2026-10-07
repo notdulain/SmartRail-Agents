@@ -286,3 +286,37 @@ async def test_failure_settles_running_tool_calls(tmp_path):
                 "error": "interrupted",
             }
         ]
+
+
+async def test_system_text_describes_file_access_per_agent(env, tmp_path):
+    ro, rw, idle = tmp_path / "ro", tmp_path / "rw", tmp_path / "idle"
+    for d in (ro, rw, idle):
+        d.mkdir()
+    reader = await _agent(env, "Reader", ro, "read_only")
+    writer = await _agent(env, "Writer", rw, "read_write")
+    idler = await _agent(env, "Idler", idle, "none")
+    plain = await _agent(env, "Plain", model=MINI)
+    await env.set_coordinator(plain["id"])
+    conv = await env.group([reader["id"], writer["id"], idler["id"]])
+    await env.run_to_end(conv)
+    systems = {}
+    for req in env.runtime.requests:
+        systems.setdefault(req.directory, req.system)
+    reader_sys = systems[reader["working_directory"]]
+    assert f"your working directory is {reader['working_directory']}" in reader_sys
+    assert "read-only" in reader_sys and "Stay inside this directory" in reader_sys
+    assert writer["working_directory"] not in reader_sys
+    writer_sys = systems[writer["working_directory"]]
+    assert "create and edit files" in writer_sys and "read-only" not in writer_sys
+    assert "File tools" not in systems[idler["working_directory"]]  # directory, but no tools
+    assert "File tools" not in systems[None]  # the coordinator has no directory
+    # Persona first, then framing, then file tools.
+    assert reader_sys.index("I am Reader.") < reader_sys.index("group discussion")
+    assert reader_sys.index("group discussion") < reader_sys.index("File tools")
+
+
+async def test_direct_system_text_mentions_tools(env, tmp_path):
+    ada = await _agent(env, "Ada", tmp_path, "read_only")
+    conv = await env.direct(ada["id"])
+    await env.run_to_end(conv)
+    assert f"your working directory is {ada['working_directory']}" in env.runtime.requests[0].system

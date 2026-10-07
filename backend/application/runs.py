@@ -285,7 +285,9 @@ class RunManager:
             speaker=speaker,
             stage=None,
             reply_to_id=None,
-            system=prompts.system_text(speaker.persona, active.brief),
+            system=prompts.system_text(
+                speaker.persona, active.brief, tools=prompts.tools_text(speaker)
+            ),
             user_text=user_text,
             max_tokens=active.participant_max_tokens,
         )

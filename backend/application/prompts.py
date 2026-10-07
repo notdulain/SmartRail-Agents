@@ -4,22 +4,50 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
 
-from backend.contracts.models import Message, MessageRole, MessageStatus
+from backend.contracts.models import (
+    AgentSnapshot,
+    Message,
+    MessageRole,
+    MessageStatus,
+    ToolAccess,
+)
 
 # Hard cap on transcript text sent in one turn; the OpenCode session keeps older context.
 MAX_TRANSCRIPT_CHARS = 24_000
 
 
-def system_text(persona: str, brief: str, framing: str = "") -> str:
+def system_text(persona: str, brief: str, framing: str = "", tools: str = "") -> str:
     parts = [persona.strip()]
     if framing:
         parts.append(framing)
+    if tools:
+        parts.append(tools)
     if brief.strip():
         parts.append(
             "Shared project brief (the latest version, shared by every agent; "
             "private conversations stay separate):\n" + brief.strip()
         )
     return "\n\n".join(p for p in parts if p)
+
+
+def tools_text(agent: AgentSnapshot) -> str:
+    """What the agent may do with files, or "" when it has no file tools."""
+    directory = agent.working_directory
+    if agent.tool_access is ToolAccess.NONE or not directory:
+        return ""
+    if agent.tool_access is ToolAccess.READ_ONLY:
+        allowed = (
+            "You can read, list and search files there. Your access is read-only: do not try "
+            "to create, edit or delete files."
+        )
+    else:
+        allowed = "You can read, list, search, create and edit files there."
+    return (
+        f"File tools: your working directory is {directory}. {allowed} Stay inside this "
+        "directory and never access paths outside it. Shell commands, web access and other "
+        "tools are not available. Use files only when they help, and say which files you "
+        "read or changed."
+    )
 
 
 def group_framing(

@@ -101,6 +101,7 @@ class DiscussionDriver:
             speaker.persona,
             active.brief,
             prompts.group_framing(speaker.name, names, topic, coordinator=coordinating),
+            prompts.tools_text(speaker),
         )
         outcome = await self.manager.run_turn(
             active,
