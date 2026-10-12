@@ -56,6 +56,61 @@ describe("MessageList", () => {
     expect(screen.getByRole("status")).toBeEmptyDOMElement();
   });
 
+  it("renders Markdown in user messages and GFM in agent replies", () => {
+    render(<MessageList messages={[
+      makeUserMessage({ content: "**Please** review this" }),
+      makeMessage({ content: [
+        "# Findings",
+        "",
+        "A **strong** point with *emphasis* and `inline code`.",
+        "",
+        "- First item",
+        "- Second item",
+        "",
+        "| Item | Status |",
+        "| --- | --- |",
+        "| Signal | Ready |",
+        "",
+        "```ts",
+        "const ready = true;",
+        "```",
+        "",
+        "- [x] Reviewed",
+      ].join("\n") }),
+    ]} />);
+
+    expect(within(screen.getByRole("article", { name: "You message" })).getByText("Please", { selector: "strong" })).toBeInTheDocument();
+    const reply = within(screen.getByRole("article", { name: "Passenger message" }));
+    expect(reply.getByRole("heading", { name: "Findings" })).toBeInTheDocument();
+    expect(reply.getByText("strong", { selector: "strong" })).toBeInTheDocument();
+    expect(reply.getByText("emphasis", { selector: "em" })).toBeInTheDocument();
+    expect(reply.getByText("First item").closest("li")).toBeInTheDocument();
+    expect(reply.getByRole("table")).toHaveTextContent("SignalReady");
+    expect(reply.getByText("inline code", { selector: "code" })).toBeInTheDocument();
+    expect(reply.getByText("const ready = true;", { selector: "code" }).closest("pre")).toBeInTheDocument();
+    expect(reply.getByRole("checkbox")).toBeChecked();
+    expect(reply.getByText("Reviewed")).toBeInTheDocument();
+  });
+
+  it("keeps raw HTML inert and filters unsafe Markdown links", () => {
+    const { container } = render(<MessageList messages={[makeMessage({
+      content: '<img src=x onerror="alert(1)"> [unsafe](javascript:alert(1)) [safe](https://example.com)',
+    })]} />);
+    expect(container.querySelector("img, script")).toBeNull();
+    const unsafe = screen.getByText("unsafe", { selector: "a" });
+    expect(unsafe.getAttribute("href") ?? "").not.toMatch(/^javascript:/i);
+    expect(screen.getByRole("link", { name: "safe" })).toHaveAttribute("target", "_blank");
+    expect(screen.getByRole("link", { name: "safe" })).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  it("renders unfinished Markdown while an answer streams", () => {
+    const message = makeMessage({ status: "streaming", content: "```ts\nconst ready =" });
+    const { rerender } = render(<MessageList messages={[message]} />);
+    expect(screen.getByText("const ready =", { selector: "code" })).toBeInTheDocument();
+    rerender(<MessageList messages={[{ ...message, status: "complete", content: "```ts\nconst ready = true;\n```" }]} />);
+    expect(screen.getByText("const ready = true;", { selector: "code" })).toBeInTheDocument();
+  });
+
   it("shows a waiting indicator before the first delta", () => {
     render(<MessageList messages={[makeMessage({ status: "streaming", content: "" })]} />);
     expect(screen.getByLabelText("Waiting for the first words")).toBeInTheDocument();

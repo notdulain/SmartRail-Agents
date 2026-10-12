@@ -5,6 +5,7 @@ import { initials, speakerStyle } from "../lib/speakerColor";
 import { stageLabel } from "../lib/stages";
 import { Button } from "./ui/Button";
 import { AttachmentChip } from "./AttachmentChip";
+import { MarkdownContent } from "./MarkdownContent";
 import { AlertIcon, CheckIcon, ChevronRightIcon, SpinnerIcon, ToolIcon } from "./ui/icons";
 
 const STAGE_HINTS: Record<number, string> = {
@@ -119,8 +120,8 @@ function UserMessage({
     <article className="flex flex-col items-end gap-1" aria-label={`${message.speaker_name} message`}>
       <div className="text-xs font-medium text-muted">{message.speaker_name}</div>
       {message.content ? (
-        <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-tr-md bg-accent-soft px-4 py-2.5 text-[0.95rem]">
-          {message.content}
+        <div className="max-w-[85%] min-w-0 rounded-2xl rounded-tr-md bg-accent-soft px-4 py-2.5 text-[0.95rem]">
+          <MarkdownContent text={message.content} />
         </div>
       ) : null}
       {images.length > 0 ? (
@@ -337,11 +338,11 @@ function AgentMessage({
 
         {message.status === "failed" && !message.content ? null : message.content || !streaming ? (
           <div
-            className={`mt-1 whitespace-pre-wrap break-words rounded-2xl rounded-tl-md bg-surface px-4 py-2.5 text-[0.95rem] ring-1 ring-line ${
+            className={`mt-1 min-w-0 rounded-2xl rounded-tl-md bg-surface px-4 py-2.5 text-[0.95rem] ring-1 ring-line ${
               streaming ? "streaming-caret" : ""
             } ${message.status === "cancelled" ? "text-fg/80" : ""}`}
           >
-            {message.content || <span className="text-muted">No text was produced.</span>}
+            {message.content ? <MarkdownContent text={message.content} /> : <span className="text-muted">No text was produced.</span>}
           </div>
         ) : (
           <div
