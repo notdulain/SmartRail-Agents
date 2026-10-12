@@ -31,9 +31,10 @@ from backend.config import LOOPBACK, load_config
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_UNREACHABLE, EXIT_TIMEOUT = 0, 1, 2, 3, 4
 
-COMMANDS = ("agents", "ask", "reply")
+COMMANDS = ("agents", "ask", "reply", "connect")
 DEFAULT_LABEL = "a coding agent"
-DEFAULT_TIMEOUT_S = 600.0
+# Under the two minutes most coding-agent shell tools allow a command; `reply` waits again.
+DEFAULT_TIMEOUT_S = 100.0
 POLL_S = 0.5
 BUSY_RETRY_S = 2.0
 MESSAGE_MAX = 20_000  # SendMessageRequest.content
@@ -265,7 +266,7 @@ async def latest_reply(
 
 
 def _first_line(text: str, width: int = 110) -> str:
-    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    line = next((ln.strip().lstrip("#").strip() for ln in text.splitlines() if ln.strip()), "")
     return line if len(line) <= width else line[: width - 1] + "…"
 
 
@@ -289,7 +290,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Run `smartrail` with no arguments to start the app. The commands below "
         "talk to an already running app.",
     )
-    sub = parser.add_subparsers(dest="command", metavar="{agents,ask,reply}")
+    sub = parser.add_subparsers(dest="command", metavar="{agents,ask,reply,connect}")
 
     def common(p: argparse.ArgumentParser) -> None:
         p.add_argument(
@@ -320,6 +321,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     ask_p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S, metavar="SECONDS")
     common(ask_p)
+
+    connect = sub.add_parser(
+        "connect",
+        help="let Claude Code and Codex sessions in any project consult these agents",
+        description="Install a short guide into Claude Code's skills and Codex's global "
+        "AGENTS.md naming the command that reaches this SmartRail from any directory.",
+    )
+    connect.add_argument("--remove", action="store_true", help="take the guide out again")
+    connect.add_argument(
+        "--print",
+        dest="print_only",
+        action="store_true",
+        help="print the guide instead of installing it",
+    )
+    connect.add_argument("--url", help="app URL to bake into the guide (default: as ask)")
 
     reply = sub.add_parser("reply", help="collect the reply of a conversation's latest run")
     reply.add_argument("conversation", metavar="CONVERSATION_ID")
@@ -364,6 +380,20 @@ async def main_async(
     if args.command is None:
         parser.print_help()
         return EXIT_USAGE
+    if args.command == "connect":
+        from backend import connect
+
+        if args.remove:
+            lines = connect.remove()
+        else:
+            url = _base_url(args.url)
+            if args.print_only:
+                print(connect.render_guide(connect.smartrail_command(), url))
+                return EXIT_OK
+            lines = connect.install(connect.smartrail_command(), url)
+        for line in lines:
+            print(line)
+        return EXIT_OK
     try:
         async with httpx.AsyncClient(
             base_url=_base_url(args.url), transport=transport, timeout=30.0

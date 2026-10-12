@@ -48,20 +48,31 @@ opencode auth login        # choose OpenAI → ChatGPT sign-in for the GPT-6-sol
    search finds discussions by title or topic.
 4. Conversation menu → **Export transcript** writes Markdown only when you ask.
 
-### Ask an agent from Claude Code or Codex
+### Let Claude Code and Codex sessions in other projects consult your agents
 
-Coding agents working on this repo can consult a SmartRail agent from the command line (the
-app must be running). [AGENTS.md](AGENTS.md) (imported by `CLAUDE.md`) tells them how:
+Coding sessions working on *another* repository can ask a SmartRail agent for input (a UI
+designer, a station manager, ...) through the command line. One-time setup, from this repo:
 
 ```text
-uv run smartrail agents
-uv run smartrail ask "UI Designer" "Should the departures board use a dark theme?" --as "Claude Code"
-uv run smartrail ask --conversation cnv_... "And for the mobile layout?"
+uv run smartrail connect          # installs a guide for Claude Code and Codex, all projects
+uv run smartrail connect --print  # show the guide instead; --remove undoes the install
 ```
 
-The reply is printed on stdout; the conversation is an ordinary direct chat in the sidebar
-(titled `Claude Code → UI Designer: ...`) that you can read, continue or delete. `--json`
-gives structured output; `SMARTRAIL_URL` or `--url` points at a non-default port.
+It writes a Claude Code skill (`~/.claude/skills/smartrail-agents/SKILL.md`) and a marked block
+in Codex's `~/.codex/AGENTS.md`, both naming the absolute path of this installation's
+`smartrail` executable, so nothing needs to be on PATH. Start a new session afterwards. SmartRail
+must be running when a session asks. The commands the sessions then use:
+
+```text
+smartrail agents                                  # who can be asked
+smartrail ask "UI Designer" "question" --as "Claude Code"
+smartrail ask --conversation cnv_... "follow-up"
+smartrail reply cnv_...                           # collect a reply after a timeout (ask waits 100 s)
+```
+
+Each consultation is an ordinary direct chat in the sidebar (titled
+`Claude Code → UI Designer: ...`) that you can read, continue or delete. `--json` gives
+structured output; `SMARTRAIL_URL` or `--url` points at a non-default port.
 
 ### Options (environment variables)
 

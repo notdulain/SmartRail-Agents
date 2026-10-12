@@ -20,7 +20,7 @@ Checks: `uv run ruff check .`, `uv run pytest -q`, `npm run typecheck`, `npm tes
 
 | Path | Owner | Notes |
 |---|---|---|
-| `backend/contracts/`, `backend/config.py`, `backend/launcher.py`, `backend/cli.py`, `backend/main.py` | coordinator | shared interfaces and startup |
+| `backend/contracts/`, `backend/config.py`, `backend/launcher.py`, `backend/cli.py`, `backend/connect.py`, `backend/main.py` | coordinator | shared interfaces and startup |
 | `backend/runtime/` | runtime agent | OpenCode adapter; implements `OpenCodeRuntime` |
 | `backend/application/` | application agent | persistence, routes, discussions, budget |
 | `frontend/` | frontend agent | React UI; types generated from the contract |
