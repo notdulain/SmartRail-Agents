@@ -6,7 +6,7 @@ from importlib import metadata
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, Query, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from sse_starlette.sse import EventSourceResponse
 
 from backend.contracts.api_spec import ERRORS
@@ -114,6 +114,19 @@ async def create_conversation(body: ConversationCreate, svc: Service = Svc):
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetail, responses=ERRORS)
 async def get_conversation(conversation_id: str, svc: Service = Svc):
     return await svc.get_conversation(conversation_id)
+
+
+@router.delete(
+    "/conversations/{conversation_id}",
+    status_code=204,
+    response_class=Response,
+    responses=ERRORS,
+)
+async def delete_conversation(conversation_id: str, svc: Service = Svc):
+    """Permanently delete a conversation with its messages, runs and event logs. 409
+    ``run_active`` if a run in this conversation is still in progress."""
+    await svc.delete_conversation(conversation_id)
+    return Response(status_code=204)
 
 
 @router.post(

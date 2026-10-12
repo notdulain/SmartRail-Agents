@@ -21,6 +21,7 @@ interface Props {
   onNewDiscussion(): void;
   onNewAgent(): void;
   onRunEnded(event: RunEvent): void;
+  onDeleted(conversationId: string): void;
 }
 
 export function ChatView({
@@ -31,6 +32,7 @@ export function ChatView({
   onNewDiscussion,
   onNewAgent,
   onRunEnded,
+  onDeleted,
 }: Props) {
   const toasts = useToasts();
   const { agents, settings, loaded } = useAppData();
@@ -61,7 +63,12 @@ export function ChatView({
             <h1 className="truncate text-base font-semibold">{conversation.title}</h1>
             <ParticipantLine conversation={conversation} agents={agents} />
           </div>
-          <ConversationMenu conversationId={conversation.id} />
+          <ConversationMenu
+            conversationId={conversation.id}
+            title={conversation.title}
+            deleteDisabled={!!state.activeRunId || chat.sending}
+            onDeleted={() => onDeleted(conversation.id)}
+          />
         </>
       ) : (
         <h1 className="flex-1 truncate text-base font-semibold">SmartRail Agents</h1>

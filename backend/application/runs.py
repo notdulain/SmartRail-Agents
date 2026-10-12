@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -237,6 +237,21 @@ class RunManager:
             self.tasks[run.id] = active
             active.task = asyncio.create_task(self._main(active), name=f"run-{run.id}")
             return run, user_message
+
+    async def delete_conversation(
+        self, conv_id: str, delete: Callable[[str], Awaitable[None]]
+    ) -> None:
+        """Run ``delete`` unless a run in this conversation is still going. Holds the start
+        lock so a run cannot begin between the check and the delete."""
+        async with self._lock:
+            if any(a.run.conversation_id == conv_id for a in self.tasks.values()):
+                raise AppError(
+                    409,
+                    ErrorCode.RUN_ACTIVE,
+                    "A reply is still being generated in this conversation. "
+                    "Stop it before deleting the conversation.",
+                )
+            await delete(conv_id)
 
     def run_active_error(self) -> AppError:
         return AppError(

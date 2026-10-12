@@ -56,4 +56,64 @@ describe("ConversationMenu", () => {
     await userEvent.click(await screen.findByRole("menuitem", { name: "Export transcript" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Conversation not found");
   });
+  const baseRoutes = {
+    "GET /api/agents": () => [],
+    "GET /api/conversations": () => [],
+    "GET /api/settings": () => ({}),
+    "GET /api/providers": () => ({ providers: [], refreshed_at: "" }),
+  };
+
+  it("deletes only after confirmation, then reports it", async () => {
+    const api = mockFetch({
+      ...baseRoutes,
+      "DELETE /api/conversations/cnv_1": () => new Response(null, { status: 204 }),
+    });
+    const onDeleted = vi.fn();
+    renderWithProviders(
+      <ConversationMenu conversationId="cnv_1" title="Platform doors" onDeleted={onDeleted} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Conversation menu" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete discussion" }));
+    expect(await screen.findByRole("dialog", { name: "Delete this discussion?" })).toBeVisible();
+    expect(api.count("DELETE /api/conversations/cnv_1")).toBe(0);
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(onDeleted).toHaveBeenCalledTimes(1));
+    expect(api.count("DELETE /api/conversations/cnv_1")).toBe(1);
+  });
+
+  it("keeps the discussion when deletion is cancelled", async () => {
+    const api = mockFetch(baseRoutes);
+    const onDeleted = vi.fn();
+    renderWithProviders(<ConversationMenu conversationId="cnv_1" onDeleted={onDeleted} />);
+    await userEvent.click(screen.getByRole("button", { name: "Conversation menu" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete discussion" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(api.count("DELETE /api/conversations/cnv_1")).toBe(0);
+    expect(onDeleted).not.toHaveBeenCalled();
+  });
+
+  it("shows an error toast and stays put when deletion fails", async () => {
+    mockFetch({
+      ...baseRoutes,
+      "DELETE /api/conversations/cnv_1": () =>
+        errorResponse(409, "run_active", "A reply is still being generated"),
+    });
+    const onDeleted = vi.fn();
+    renderWithProviders(<ConversationMenu conversationId="cnv_1" onDeleted={onDeleted} />);
+    await userEvent.click(screen.getByRole("button", { name: "Conversation menu" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete discussion" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("A reply is still being generated");
+    expect(onDeleted).not.toHaveBeenCalled();
+  });
+
+  it("disables Delete while a reply is being generated", async () => {
+    mockFetch(baseRoutes);
+    renderWithProviders(<ConversationMenu conversationId="cnv_1" deleteDisabled />);
+    await userEvent.click(screen.getByRole("button", { name: "Conversation menu" }));
+    expect(await screen.findByRole("menuitem", { name: "Delete discussion" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+  });
 });

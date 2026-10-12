@@ -296,6 +296,11 @@ class Store:
         )
         return await self._conversations(rows)
 
+    async def delete_conversation(self, conv_id: str) -> None:
+        """Remove the conversation; participants, runs, events, messages and the session map
+        go with it (ON DELETE CASCADE)."""
+        await self.db.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
+
     @staticmethod
     def stmt_touch_conversation(conv_id: str, when: datetime) -> Statement:
         return ("UPDATE conversations SET updated_at = ? WHERE id = ?", (iso(when), conv_id))

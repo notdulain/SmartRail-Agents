@@ -111,6 +111,7 @@ function Shell() {
             onNewDiscussion={() => openDialog({ kind: "discussion" })}
             onNewAgent={() => openAgent(null)}
             onRunEnded={onRunEnded}
+            onDeleted={() => select(null)}
           />
         )}
       </main>

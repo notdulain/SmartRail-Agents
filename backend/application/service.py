@@ -299,6 +299,11 @@ class Service:
             else None,
         )
 
+    async def delete_conversation(self, conv_id: str) -> None:
+        if await self.store.get_conversation(conv_id) is None:
+            raise not_found("Conversation", conv_id)
+        await self.runs.delete_conversation(conv_id, self.store.delete_conversation)
+
     async def send_message(self, conv_id: str, body: SendMessageRequest) -> SendMessageResponse:
         conv = await self.store.get_conversation(conv_id)
         if conv is None:

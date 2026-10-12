@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import NoReturn
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Query
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from sse_starlette.sse import EventSourceResponse
 
 from .models import (
@@ -107,6 +107,18 @@ async def create_conversation(body: ConversationCreate):
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetail, responses=ERRORS)
 async def get_conversation(conversation_id: str):
+    _stub()
+
+
+@router.delete(
+    "/conversations/{conversation_id}",
+    status_code=204,
+    response_class=Response,
+    responses=ERRORS,
+)
+async def delete_conversation(conversation_id: str):
+    """Permanently delete a conversation with its messages, runs and event logs. 409
+    ``run_active`` if a run in this conversation is still in progress."""
     _stub()
 
 

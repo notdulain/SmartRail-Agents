@@ -69,6 +69,7 @@ function setup(routes: Record<string, (r: never) => unknown> = {}, props: object
     onNewDiscussion: vi.fn(),
     onNewAgent: vi.fn(),
     onRunEnded: vi.fn(),
+    onDeleted: vi.fn(),
     ...props,
   };
   renderWithProviders(<ChatView conversationId="cnv_1" {...callbacks} />);

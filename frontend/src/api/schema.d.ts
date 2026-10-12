@@ -91,7 +91,12 @@ export interface paths {
         get: operations["get_conversation_api_conversations__conversation_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Conversation
+         * @description Permanently delete a conversation with its messages, runs and event logs. 409
+         *     ``run_active`` if a run in this conversation is still in progress.
+         */
+        delete: operations["delete_conversation_api_conversations__conversation_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1196,6 +1201,53 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ConversationDetail"];
                 };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    delete_conversation_api_conversations__conversation_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Not Found */
             404: {

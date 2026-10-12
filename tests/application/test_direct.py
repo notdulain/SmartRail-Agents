@@ -105,3 +105,40 @@ async def test_conversation_list_title_defaults(env):
     await env.direct(ada["id"])
     listed = (await env.client.get("/api/conversations")).json()
     assert listed[0]["title"] == "Ada" and listed[0]["type"] == "direct"
+
+
+async def test_delete_conversation_removes_it_and_its_data(env):
+    ada = await env.agent("Ada")
+    conv = await env.direct(ada["id"])
+    other = await env.direct((await env.agent("Bo"))["id"])
+    run = await env.run_to_end(conv, "hello")
+
+    r = await env.client.delete(f"/api/conversations/{conv}")
+    assert r.status_code == 204
+    assert r.content == b""
+
+    assert (await env.client.get(f"/api/conversations/{conv}")).status_code == 404
+    assert (await env.client.get(f"/api/runs/{run['id']}")).status_code == 404
+    assert [c["id"] for c in (await env.client.get("/api/conversations")).json()] == [other]
+    # The agent survives, and a second delete is a 404.
+    assert [a["id"] for a in (await env.client.get("/api/agents")).json()][0] == ada["id"]
+    assert (await env.client.delete(f"/api/conversations/{conv}")).status_code == 404
+
+
+async def test_delete_conversation_is_refused_while_a_run_is_active(tmp_path):
+    runtime = GatedRuntime()
+    runtime.gate.clear()
+    async with running_app(tmp_path / "data", runtime) as env:
+        ada = await env.agent("Ada")
+        conv = await env.direct(ada["id"])
+        sent = await env.send(conv)
+        await runtime.arrived.wait()
+
+        r = await env.client.delete(f"/api/conversations/{conv}")
+        assert r.status_code == 409
+        assert r.json()["code"] == "run_active"
+        assert (await env.client.get(f"/api/conversations/{conv}")).status_code == 200
+
+        runtime.gate.set()
+        await env.wait(sent["run_id"])
+        assert (await env.client.delete(f"/api/conversations/{conv}")).status_code == 204

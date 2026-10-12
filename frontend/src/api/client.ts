@@ -73,6 +73,7 @@ export interface ApiClient {
   listConversations(): Promise<Conversation[]>;
   createConversation(body: ConversationCreate): Promise<Conversation>;
   getConversation(id: string): Promise<ConversationDetail>;
+  deleteConversation(id: string): Promise<void>;
   sendMessage(
     conversationId: string,
     content: string,
@@ -111,6 +112,7 @@ export function createApiClient(fetchImpl: FetchLike = (...a) => fetch(...a)): A
       throw new ApiError(0, "network_error", "Cannot reach the SmartRail backend.");
     }
     if (!res.ok) throw await toApiError(res);
+    if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
   }
   const json = (method: string, body: unknown): RequestInit => ({
@@ -126,6 +128,8 @@ export function createApiClient(fetchImpl: FetchLike = (...a) => fetch(...a)): A
     listConversations: () => request("/conversations"),
     createConversation: (b) => request("/conversations", json("POST", b)),
     getConversation: (id) => request(`/conversations/${encodeURIComponent(id)}`),
+    deleteConversation: (id) =>
+      request(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE" }),
     sendMessage: (id, content, attachments = [], images = []) =>
       request(
         `/conversations/${encodeURIComponent(id)}/messages`,
