@@ -275,6 +275,11 @@ def run(env: Mapping[str, str] | None = None) -> None:
 
 
 def main() -> None:
+    from backend import cli
+
+    # `smartrail ask ...` and friends are client commands for an app that is already running.
+    if len(sys.argv) > 1 and (sys.argv[1] in cli.COMMANDS or sys.argv[1] in ("-h", "--help")):
+        raise SystemExit(cli.main(sys.argv[1:]))
     try:
         run()
     except LauncherError as exc:

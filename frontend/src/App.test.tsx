@@ -42,6 +42,17 @@ describe("App", () => {
     expect(screen.queryByRole("button", { name: "Chat with Archived Ann" })).not.toBeInTheDocument();
   });
 
+  it("picks up conversations created elsewhere when the window regains focus", async () => {
+    let list = [makeConversation()];
+    const api = routes({ "GET /api/conversations": () => list });
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Chat with Passenger" })).toBeInTheDocument();
+    list = [...list, makeConversation({ id: "cnv_cli", title: "Coding agent → Passenger: platform sign" })];
+    window.dispatchEvent(new Event("focus"));
+    expect(await screen.findByText("Coding agent → Passenger: platform sign")).toBeInTheDocument();
+    expect(api.count("GET /api/conversations")).toBe(2);
+  });
+
   it("shows the empty state when there are no agents", async () => {
     routes({ "GET /api/agents": () => [], "GET /api/conversations": () => [] });
     render(<App />);

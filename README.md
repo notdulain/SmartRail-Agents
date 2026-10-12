@@ -48,11 +48,27 @@ opencode auth login        # choose OpenAI → ChatGPT sign-in for the GPT-6-sol
    search finds discussions by title or topic.
 4. Conversation menu → **Export transcript** writes Markdown only when you ask.
 
+### Ask an agent from Claude Code or Codex
+
+Coding agents working on this repo can consult a SmartRail agent from the command line (the
+app must be running). [AGENTS.md](AGENTS.md) (imported by `CLAUDE.md`) tells them how:
+
+```text
+uv run smartrail agents
+uv run smartrail ask "UI Designer" "Should the departures board use a dark theme?" --as "Claude Code"
+uv run smartrail ask --conversation cnv_... "And for the mobile layout?"
+```
+
+The reply is printed on stdout; the conversation is an ordinary direct chat in the sidebar
+(titled `Claude Code → UI Designer: ...`) that you can read, continue or delete. `--json`
+gives structured output; `SMARTRAIL_URL` or `--url` points at a non-default port.
+
 ### Options (environment variables)
 
 | Variable | Purpose |
 |---|---|
-| `SMARTRAIL_PORT` | app port (default 8765) |
+| `SMARTRAIL_PORT` | app port (default 8765; the `ask` commands use it too) |
+| `SMARTRAIL_URL` | where `smartrail ask/agents/reply` find the app (default `http://127.0.0.1:$SMARTRAIL_PORT`) |
 | `SMARTRAIL_DATA_DIR` | database, logs, runtime files (default: your OS app-data folder) |
 | `SMARTRAIL_OPENCODE_PORT` | fixed port for the managed OpenCode (default: random free port) |
 | `SMARTRAIL_OPENCODE_URL` + `SMARTRAIL_OPENCODE_PASSWORD` | attach to an OpenCode you started yourself |

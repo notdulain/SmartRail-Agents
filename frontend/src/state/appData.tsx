@@ -97,6 +97,14 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
+  // Coding agents consulting an agent through `smartrail ask` create conversations outside
+  // this page; pick them up when the user comes back to it.
+  useEffect(() => {
+    const onFocus = () => void refreshConversations().catch(() => undefined);
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshConversations]);
+
   const value = useMemo<AppData>(
     () => ({
       agents,

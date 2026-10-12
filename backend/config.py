@@ -8,6 +8,8 @@ Environment overrides (for isolated tests and worktree development):
     SMARTRAIL_OPENCODE_PASSWORD  password for that instance
     SMARTRAIL_OPENCODE_BIN  path to the opencode executable
     SMARTRAIL_NO_BROWSER    set to 1 to skip opening the browser
+    SMARTRAIL_URL           where the ``smartrail ask`` CLI finds a running app (default:
+                            http://127.0.0.1:SMARTRAIL_PORT)
 """
 
 from __future__ import annotations
